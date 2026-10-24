@@ -1,0 +1,100 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover"
+    />
+    <meta name="theme-color" content="#140d0a" />
+    <meta name="mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+    <meta name="apple-mobile-web-app-title" content="Ember" />
+    <link rel="manifest" href="/manifest.webmanifest" />
+    <link rel="icon" href="/icon.svg" type="image/svg+xml" />
+    <link rel="apple-touch-icon" href="/icon-180.png" />
+    <title>Ember – Controller</title>
+    <link rel="stylesheet" href="./style.css" />
+  </head>
+  <body>
+    <main id="app">
+      <!-- Join form -->
+      <section id="screen-join" class="screen">
+        <div class="join-card">
+          <h1 class="logo">Ember</h1>
+          <p class="tagline">Keep the fire burning.</p>
+          <form id="join-form" autocomplete="off">
+            <label>
+              <span>Room code</span>
+              <input id="join-room" name="room" maxlength="4" inputmode="text" autocapitalize="characters"
+                spellcheck="false" placeholder="ABCD" required />
+            </label>
+            <label>
+              <span>Your name</span>
+              <input id="join-name" name="name" maxlength="12" spellcheck="false" placeholder="Name" required />
+            </label>
+            <button id="join-btn" type="submit" class="big-btn">Join &amp; go fullscreen</button>
+          </form>
+          <p id="join-error" class="error" role="alert"></p>
+          <p id="ios-hint" class="hint" hidden>
+            iPhone tip: tap <strong>Share → Add to Home Screen</strong> and open Ember from there for fullscreen.
+          </p>
+        </div>
+      </section>
+
+      <!-- Lobby / game over -->
+      <section id="screen-wait" class="screen" hidden>
+        <div class="wait-card">
+          <div class="me">
+            <span id="wait-dot" class="dot"></span>
+            <span id="wait-name" class="me-name"></span>
+            <span id="wait-slot" class="me-slot"></span>
+          </div>
+          <h2 id="wait-title">Waiting for players</h2>
+          <p id="wait-sub" class="sub">Press Ready when you are set. The game starts when everyone is ready.</p>
+          <button id="ready-btn" type="button" class="big-btn ready-btn">Ready</button>
+          <button id="leave-btn" type="button" class="link-btn">Leave room</button>
+        </div>
+      </section>
+
+      <!-- Controller pad -->
+      <section id="screen-pad" class="screen pad" hidden>
+        <div class="pad-top">
+          <div class="bars">
+            <div class="bar hp"><i id="hud-hp"></i><b>❤</b></div>
+            <div class="bar food"><i id="hud-food"></i><b>🍖</b></div>
+          </div>
+          <div id="hud-hint" class="hud-hint"></div>
+          <div id="hud-item" class="hud-item"></div>
+        </div>
+        <div id="hud-progress" class="hud-progress"><i></i></div>
+        <div id="stick-zone" class="stick-zone">
+          <div id="stick-hint" class="stick-hint">Move</div>
+          <div id="stick-base" class="stick-base" hidden><div id="stick-knob" class="stick-knob"></div></div>
+        </div>
+        <div class="buttons">
+          <button id="btn-c" class="pad-btn btn-c" type="button"><span class="key">C</span><span class="lbl"></span></button>
+          <button id="btn-b" class="pad-btn btn-b" type="button"><span class="key">B</span><span class="lbl"></span></button>
+          <button id="btn-a" class="pad-btn btn-a" type="button"><span class="key">A</span><span class="lbl"></span></button>
+        </div>
+        <div id="downed" class="downed" hidden>
+          <strong>You're down!</strong>
+          <span>A teammate can hold A next to you to revive you.</span>
+        </div>
+      </section>
+    </main>
+
+    <div id="overlay-rotate" class="overlay" hidden>
+      <div class="rotate-icon">📱</div>
+      <p>Rotate your phone to landscape</p>
+    </div>
+    <div id="overlay-tap" class="overlay tap" hidden>
+      <button id="tap-btn" type="button" class="big-btn">Tap to continue</button>
+    </div>
+    <div id="banner" class="banner" hidden></div>
+    <div id="flash" class="flash"></div>
+
+    <script type="module" src="./main.ts"></script>
+  </body>
+</html>

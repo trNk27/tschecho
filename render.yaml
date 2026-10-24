@@ -1,0 +1,17 @@
+# Render Blueprint: one web service serves both pages, /healthz and the /ws relay.
+services:
+  - type: web
+    name: ember
+    runtime: node
+    plan: free # switch to "starter" to avoid the ~1 minute cold start
+    buildCommand: npm ci --include=dev && npm run build
+    startCommand: node server/dist/index.js
+    healthCheckPath: /healthz
+    autoDeploy: true
+    envVars:
+      - key: NODE_VERSION
+        value: "22"
+      # Optional extra origins allowed to open the WebSocket (comma separated),
+      # e.g. a custom domain. The service's own domain is always allowed.
+      - key: ALLOWED_ORIGINS
+        sync: false

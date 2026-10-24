@@ -1,0 +1,104 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="theme-color" content="#140d0a" />
+    <link rel="icon" href="/icon.svg" type="image/svg+xml" />
+    <title>Ember</title>
+    <link rel="stylesheet" href="./style.css" />
+  </head>
+  <body>
+    <div id="stage"></div>
+
+    <!-- In-game overlay: viewport frames, shared strip, banner -->
+    <div id="hud" hidden>
+      <div id="frames"></div>
+      <div id="extra-cell" class="extra-cell" hidden>
+        <canvas id="minimap" width="240" height="240"></canvas>
+        <div class="extra-fire">
+          <div class="extra-label">Campfire</div>
+          <div class="fuel big"><i id="extra-fuel"></i></div>
+          <div id="extra-text" class="extra-text"></div>
+        </div>
+      </div>
+      <div id="strip" class="strip">
+        <span id="strip-phase" class="strip-phase"></span>
+        <span id="strip-time" class="strip-time"></span>
+        <span class="strip-fire">🔥<span class="fuel"><i id="strip-fuel"></i></span></span>
+      </div>
+      <div id="banner" class="banner"></div>
+      <div id="paused" class="paused" hidden>Paused – waiting for controllers to reconnect…</div>
+    </div>
+
+    <!-- Lobby -->
+    <section id="lobby" class="panel" hidden>
+      <div class="lobby-grid">
+        <div class="lobby-left">
+          <h1 class="logo">Ember</h1>
+          <p class="tagline">Keep the campfire burning through the night.</p>
+          <div class="join-box">
+            <canvas id="qr" width="220" height="220" aria-label="QR code to join"></canvas>
+            <div class="join-text">
+              <div class="join-label">Scan with your phone or open</div>
+              <div id="join-url" class="join-url"></div>
+              <div class="join-label">Room code</div>
+              <div id="room-code" class="room-code">····</div>
+            </div>
+          </div>
+          <ul class="howto">
+            <li><b>Day:</b> gather wood, stone and berries. You carry one stack at a time.</li>
+            <li><b>B</b> near the fire throws wood in. <b>C</b> builds torches (2 wood) and walls (3 stone).</li>
+            <li><b>Night:</b> creatures come out of the dark. They fear the light – stay close to it.</li>
+            <li>Downed? A teammate holds <b>A</b> next to you to revive you.</li>
+          </ul>
+        </div>
+        <div class="lobby-right">
+          <h2>Players</h2>
+          <div id="slots" class="slots"></div>
+          <div class="settings">
+            <div class="setting">
+              <span>Nights to survive</span>
+              <div class="seg" id="seg-nights">
+                <button type="button" data-v="3">3 · quick</button>
+                <button type="button" data-v="5">5 · full</button>
+              </div>
+            </div>
+            <div class="setting">
+              <span>Graphics</span>
+              <div class="seg" id="seg-quality">
+                <button type="button" data-v="high">High</button>
+                <button type="button" data-v="low">Low</button>
+              </div>
+            </div>
+          </div>
+          <div id="lobby-status" class="lobby-status"></div>
+          <button id="start-btn" type="button" class="big-btn" disabled>Start</button>
+          <p id="sound-hint" class="sound-hint">🔇 Click anywhere on this screen once to turn on sound.</p>
+        </div>
+      </div>
+    </section>
+
+    <!-- Game over -->
+    <section id="over" class="panel over" hidden>
+      <div class="over-card">
+        <h1 id="over-title"></h1>
+        <p id="over-reason" class="over-reason"></p>
+        <div id="over-stats" class="over-stats"></div>
+        <div id="over-players" class="over-players"></div>
+        <p class="over-hint">Press <b>Ready</b> on your phones to play again on a new island.</p>
+        <div class="over-actions">
+          <button id="again-btn" type="button" class="big-btn">Play again</button>
+          <button id="lobby-btn" type="button" class="ghost-btn">Back to lobby</button>
+        </div>
+      </div>
+    </section>
+
+    <div id="toast" class="toast" hidden></div>
+    <button id="sound-btn" type="button" class="sound-btn" title="Sound">🔇</button>
+    <div id="fps" class="fps" hidden></div>
+    <div id="error" class="fatal" hidden></div>
+
+    <script type="module" src="./main.ts"></script>
+  </body>
+</html>
