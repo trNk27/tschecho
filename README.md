@@ -19,6 +19,10 @@ A 1–4 player co-op survival game for game night. Phones are the controllers, o
 
 The run is lost when the fire goes out or everyone is downed, and won at dawn of the last night (3 or 5 nights, chosen in the lobby; 5 nights take about 19 minutes). Each run gets a new island.
 
+**The camera** sits behind each player and looks ahead. The joystick is relative to it (up = forward); when you walk sideways the camera slowly swings round behind you, and it pulls in when a building stands behind you.
+
+**The first three days are an easy introduction.** Day 1 is longer (2½ min), night 1 has no zombie horde and only a creature or two, enemies hit softer and notice you later, the fire burns slower and hunger drops slower. Goals at the top of the screen (and on the phones) walk the team through every mechanic: chopping, feeding the fire, eating, torches, mining, walls, searching cars, weapons and gas cans. If everyone is downed during the first three nights you wake up by the fire (it costs some fuel) instead of losing. From night 4 the full difficulty kicks in and keeps rising.
+
 ### The abandoned city
 
 One side of every island holds a ruined city: 16 blocks of streets, wrecked cars, dumpsters, debris, collapsed buildings and zombies. Walk up to a car or dumpster and hold **A** to search it (each can be searched once a day; some refill at dawn). The city has three districts, shown on your phone and screen when you enter them:
@@ -42,7 +46,7 @@ Gear has its own slots (it does not take up your carried stack). Tap **A** on a 
 | Gas can ⛽ (carried) | +22 fuel each when poured on the fire |
 | Canned food 🥫 (carried) | +45 hunger |
 
-Difficulty rises every night: more and faster shadow creatures, a bigger zombie horde, tougher zombies, faster fuel drain, and the city refills with more zombies each dawn. All of it also scales with the number of players. Each player carries a small lantern at night, so dark streets stay readable (it does not scare anything away).
+After the easy first three days, difficulty rises every night: more and faster shadow creatures, a bigger zombie horde, tougher zombies, faster fuel drain, and the city refills with more zombies each dawn. All of it also scales with the number of players. Each player carries a small lantern at night, so dark streets stay readable (it does not scare anything away).
 
 ## Run it locally
 

@@ -8,6 +8,7 @@ import { CITY } from './config';
 import {
   AMMO_PICKUP,
   ARMOR,
+  CAMERA,
   CAN_FOOD,
   CARRY_MAX,
   CREATURE,
@@ -15,9 +16,12 @@ import {
   DT,
   FIRE,
   GAS_FUEL,
+  GENTLE_NIGHTS,
+  ease,
+  easeCap,
+  phaseLength,
   MAX_GEAR_ON_GROUND,
   MAX_ITEMS_ON_GROUND,
-  PHASE_TIME,
   PISTOL_AMMO,
   PLAYER,
   RESOURCES,
@@ -69,6 +73,7 @@ export interface PlayerState {
   armor: ArmorKind | '';
   area: number; // -1 wilds, 0..2 city district
   areaT: number; // seconds since entering the area
+  camYaw: number; // yaw of the third-person camera; the joystick is relative to it
 }
 
 export interface ZombieState {
@@ -146,7 +151,7 @@ export interface WallState {
 }
 
 export interface SimState {
-  version: 2;
+  version: 3;
   seed: number;
   nights: number;
   night: number;
@@ -165,6 +170,7 @@ export interface SimState {
   hordeLeft: number;
   hordeTimer: number;
   hordeWarned: boolean;
+  goalsDone: number; // bitmask over GOALS
   trees: number[]; // wood left, 0 = stump
   rocks: number[]; // stone left, 0 = gone
   bushes: number[]; // berries left
@@ -173,7 +179,19 @@ export interface SimState {
   nextId: number;
   rng: number;
   over: null | { won: boolean; reason: string };
-  stats: { woodBurned: number; kills: number; zombies: number; revives: number; torches: number; walls: number; searched: number };
+  stats: {
+    woodBurned: number;
+    kills: number;
+    zombies: number;
+    revives: number;
+    torches: number;
+    walls: number;
+    searched: number;
+    chopped: number;
+    mined: number;
+    eaten: number;
+    gas: number;
+  };
 }
 
 export type SimEvent =
@@ -185,6 +203,8 @@ export type SimEvent =
   | { type: 'search' | 'gear'; slot: number; x: number; z: number }
   | { type: 'zombieHit' | 'zombieDie' | 'zombieAttack' | 'trample'; x: number; z: number }
   | { type: 'horde' }
+  | { type: 'goal'; text: string; last: boolean }
+  | { type: 'rescue' }
   | { type: 'area'; slot: number; area: number }
   | { type: 'phase'; phase: Phase | 'dawn'; night: number }
   | { type: 'over'; won: boolean };
@@ -235,6 +255,19 @@ export const GEAR_ICON: Record<GearKind, string> = {
 
 type Loot = GearKind | 'fuel' | 'can' | 'wood';
 
+/** Guided goals for the first three days, one mechanic at a time. */
+export const GOALS: { day: number; text: string; done: (s: SimState) => boolean }[] = [
+  { day: 1, text: 'Chop a tree: walk up to it and hold A', done: (s) => s.stats.chopped > 0 },
+  { day: 1, text: 'Bring wood to the fire and press B', done: (s) => s.stats.woodBurned > 0 },
+  { day: 1, text: 'Pick berries (tap A), eat one (B)', done: (s) => s.stats.eaten > 0 },
+  { day: 1, text: 'Carry 2 wood and press C for a torch', done: (s) => s.stats.torches > 0 },
+  { day: 2, text: 'Mine a rock: hold A next to it', done: (s) => s.stats.mined > 0 },
+  { day: 2, text: 'Carry 3 stone and press C for a wall', done: (s) => s.stats.walls > 0 },
+  { day: 2, text: 'Search a car in the city (hold A)', done: (s) => s.stats.searched > 0 },
+  { day: 3, text: 'Find a weapon in the city', done: (s) => s.players.some((p) => p.weapon !== '') },
+  { day: 3, text: 'Pour a gas can on the fire (B)', done: (s) => s.stats.gas > 0 },
+];
+
 /** Loot tables per district: [what, weight]. Better gear deeper in the city. */
 const LOOT: Record<0 | 1 | 2, [Loot, number][]> = {
   0: [['can', 35], ['bat', 18], ['jacket', 12], ['wood', 20], ['fuel', 15]],
@@ -254,7 +287,7 @@ export class Sim {
 
   static newState(world: World, nights: number): SimState {
     const state: SimState = {
-      version: 2,
+      version: 3,
       seed: world.seed,
       nights,
       night: 1,
@@ -273,6 +306,7 @@ export class Sim {
       hordeLeft: 0,
       hordeTimer: 0,
       hordeWarned: false,
+      goalsDone: 0,
       trees: world.trees.map(() => RESOURCES.treeWood),
       rocks: world.rocks.map(() => RESOURCES.rockStone),
       bushes: world.bushes.map(() => RESOURCES.bushBerries),
@@ -281,7 +315,19 @@ export class Sim {
       nextId: 1,
       rng: (world.seed * 2654435761) >>> 0,
       over: null,
-      stats: { woodBurned: 0, kills: 0, zombies: 0, revives: 0, torches: 0, walls: 0, searched: 0 },
+      stats: {
+        woodBurned: 0,
+        kills: 0,
+        zombies: 0,
+        revives: 0,
+        torches: 0,
+        walls: 0,
+        searched: 0,
+        chopped: 0,
+        mined: 0,
+        eaten: 0,
+        gas: 0,
+      },
     };
     new Sim(world, state).populateCity(1);
     return state;
@@ -306,6 +352,9 @@ export class Sim {
     const a = (slot - 1) * (Math.PI / 2) + Math.PI / 4;
     const x = Math.cos(a) * 3.2;
     const z = Math.sin(a) * 3.2;
+    // Face the fire: the camera starts behind the player with the camp and teammates in view.
+    const fx = -Math.cos(a);
+    const fz = -Math.sin(a);
     this.state.players.push({
       slot,
       name,
@@ -314,8 +363,8 @@ export class Sim {
       z,
       px: x,
       pz: z,
-      fx: 0,
-      fz: 1,
+      fx,
+      fz,
       speed: 0,
       hp: PLAYER.maxHp,
       food: PLAYER.maxFood,
@@ -335,6 +384,7 @@ export class Sim {
       armor: '',
       area: -1,
       areaT: 9,
+      camYaw: Math.atan2(fx, fz),
     });
     this.state.players.sort((a, b) => a.slot - b.slot);
   }
@@ -567,7 +617,7 @@ export class Sim {
     // Fire fuel.
     const pf = 0.75 + 0.125 * Math.max(1, s.players.length);
     const nf = 1 + 0.1 * (s.night - 1);
-    s.fuel -= FIRE.drain[s.phase] * pf * nf * DT;
+    s.fuel -= FIRE.drain[s.phase] * pf * nf * (0.6 + 0.4 * easeCap(s.night)) * DT;
     if (s.fuel <= 0) {
       s.fuel = 0;
       this.end(false, `The fire went out on ${s.phase === 'day' ? 'day' : 'night'} ${s.night}.`);
@@ -607,8 +657,51 @@ export class Sim {
 
     const active = s.players.filter((p) => p.connected);
     if (active.length > 0 && active.every((p) => p.downed)) {
-      this.end(false, active.length > 1 ? 'Everyone was downed.' : 'You were downed.');
+      if (s.night <= GENTLE_NIGHTS) this.rescue();
+      else this.end(false, active.length > 1 ? 'Everyone was downed.' : 'You were downed.');
     }
+    this.checkGoals();
+  }
+
+  /** Early on, a wipe is not the end: everyone wakes up by the fire, which costs fuel. */
+  private rescue(): void {
+    const s = this.state;
+    s.players.forEach((p, i) => {
+      const a = (i / Math.max(1, s.players.length)) * Math.PI * 2 + 0.4;
+      p.x = p.px = Math.cos(a) * 2.6;
+      p.z = p.pz = Math.sin(a) * 2.6;
+      p.downed = false;
+      p.hp = 50;
+      p.food = Math.max(p.food, 40);
+      p.reviveProgress = 0;
+    });
+    s.fuel = Math.max(8, s.fuel - 15);
+    // Clear the area around the camp so nobody is downed again straight away.
+    for (const z of s.zombies) if (Math.hypot(z.x, z.z) < 14) z.hp = 0;
+    for (const c of s.creatures) if (Math.hypot(c.x, c.z) < 16) c.flee = true;
+    this.removeDead();
+    this.events.push({ type: 'rescue' });
+  }
+
+  private checkGoals(): void {
+    const s = this.state;
+    for (let i = 0; i < GOALS.length; i++) {
+      const bit = 1 << i;
+      if (s.goalsDone & bit || !GOALS[i].done(s)) continue;
+      s.goalsDone |= bit;
+      if (s.night <= GENTLE_NIGHTS) {
+        const left = GOALS.some((g, j) => !(s.goalsDone & (1 << j)) && g.day <= s.night);
+        this.events.push({ type: 'goal', text: GOALS[i].text, last: !left });
+      }
+    }
+  }
+
+  /** The goal to show right now (only during the first days). */
+  currentGoal(): { text: string; index: number; total: number } | null {
+    const s = this.state;
+    if (s.night > GENTLE_NIGHTS) return null;
+    const i = GOALS.findIndex((g, j) => !(s.goalsDone & (1 << j)) && g.day <= s.night);
+    return i < 0 ? null : { text: GOALS[i].text, index: i + 1, total: GOALS.length };
   }
 
   private end(won: boolean, reason: string): void {
@@ -619,22 +712,23 @@ export class Sim {
   private stepPhase(): void {
     const s = this.state;
     s.phaseTime += DT;
-    if (s.phase === 'day' && s.phaseTime >= PHASE_TIME.day) {
+    if (s.phase === 'day' && s.phaseTime >= phaseLength('day', s.night)) {
       s.phase = 'dusk';
       s.phaseTime = 0;
       this.events.push({ type: 'phase', phase: 'dusk', night: s.night });
-    } else if (s.phase === 'dusk' && s.phaseTime >= PHASE_TIME.dusk) {
+    } else if (s.phase === 'dusk' && s.phaseTime >= phaseLength('dusk', s.night)) {
       s.phase = 'night';
       s.phaseTime = 0;
       const players = Math.max(1, s.players.length);
-      s.spawnLeft = Math.round((2 + 1.6 * s.night) * (0.55 + 0.45 * players));
+      s.spawnLeft = Math.max(1, Math.round((2 + 1.6 * s.night) * (0.55 + 0.45 * players) * ease(s.night)));
       s.spawnTimer = 0;
       // A zombie horde leaves the city and marches on the camp; bigger every night.
-      s.hordeLeft = Math.round((1 + 1.4 * s.night) * (0.6 + 0.4 * players));
+      // No horde on the first night.
+      s.hordeLeft = s.night === 1 ? 0 : Math.round((1 + 1.4 * s.night) * (0.6 + 0.4 * players) * ease(s.night));
       s.hordeTimer = 6;
       s.hordeWarned = false;
       this.events.push({ type: 'phase', phase: 'night', night: s.night });
-    } else if (s.phase === 'night' && s.phaseTime >= PHASE_TIME.night) {
+    } else if (s.phase === 'night' && s.phaseTime >= phaseLength('night', s.night)) {
       this.dawn();
     }
   }
@@ -693,7 +787,7 @@ export class Sim {
     }
 
     // Hunger and health.
-    p.food = Math.max(0, p.food - PLAYER.foodDrain * DT);
+    p.food = Math.max(0, p.food - PLAYER.foodDrain * (this.state.night <= 2 ? 0.7 : 1) * DT);
     if (p.food <= 0) this.damagePlayer(p, PLAYER.starveDamage * DT, false);
     else if (p.food > 40) {
       const nearFire = p.x * p.x + p.z * p.z < this.fireRadius() ** 2;
@@ -701,9 +795,13 @@ export class Sim {
     }
     if (p.downed) return;
 
-    // Movement. Joystick up = screen up = world -z.
-    const mx = p.connected ? inp.x : 0;
-    const mz = p.connected ? -inp.y : 0;
+    // Movement relative to the third-person camera: joystick up = forward, right = right.
+    const jx = p.connected ? inp.x : 0;
+    const jy = p.connected ? inp.y : 0;
+    const fwx = Math.sin(p.camYaw);
+    const fwz = Math.cos(p.camYaw);
+    const mx = -fwz * jx + fwx * jy;
+    const mz = fwx * jx + fwz * jy;
     const mag = Math.min(1, Math.hypot(mx, mz));
     const busy = p.actionTime > 0 && mag < 0.35;
     if (mag > 0.08 && !busy) {
@@ -718,6 +816,10 @@ export class Sim {
       const fl = Math.hypot(fx, fz) || 1;
       p.fx = fx / fl;
       p.fz = fz / fl;
+      // The camera slowly swings round behind the walking direction (not when backing up).
+      let diff = Math.atan2(tx, tz) - p.camYaw;
+      diff = Math.atan2(Math.sin(diff), Math.cos(diff));
+      if (Math.abs(diff) < 2.3 && mag > 0.25) p.camYaw += diff * Math.min(1, CAMERA.follow * mag * DT);
     } else {
       p.speed = 0;
     }
@@ -889,6 +991,7 @@ export class Sim {
       p.actionTime = 0;
       const tree = this.world.trees[t.i];
       s.trees[t.i]--;
+      s.stats.chopped++;
       this.give(p, 'wood', 1);
       this.events.push({ type: 'chop', slot: p.slot, x: tree.x, z: tree.z });
       this.events.push({ type: 'pickup', slot: p.slot, x: p.x, z: p.z });
@@ -898,6 +1001,7 @@ export class Sim {
       p.actionTime = 0;
       const rock = this.world.rocks[t.i];
       s.rocks[t.i]--;
+      s.stats.mined++;
       this.give(p, 'stone', 1);
       this.events.push({ type: 'mine', slot: p.slot, x: rock.x, z: rock.z });
       this.events.push({ type: 'pickup', slot: p.slot, x: p.x, z: p.z });
@@ -1075,6 +1179,7 @@ export class Sim {
     if (p.item.type === 'berry') {
       p.item.count--;
       p.food = Math.min(PLAYER.maxFood, p.food + PLAYER.berryFood);
+      s.stats.eaten++;
       p.hp = Math.min(PLAYER.maxHp, p.hp + PLAYER.berryHp);
       if (p.item.count <= 0) p.item = null;
       this.events.push({ type: 'eat', slot: p.slot, x: p.x, z: p.z });
@@ -1083,6 +1188,7 @@ export class Sim {
     if (p.item.type === 'can') {
       p.item.count--;
       p.food = Math.min(PLAYER.maxFood, p.food + CAN_FOOD);
+      s.stats.eaten++;
       p.hp = Math.min(PLAYER.maxHp, p.hp + PLAYER.berryHp);
       if (p.item.count <= 0) p.item = null;
       this.events.push({ type: 'eat', slot: p.slot, x: p.x, z: p.z });
@@ -1090,6 +1196,7 @@ export class Sim {
     }
     if (p.item.type === 'fuel' && this.nearFire(p)) {
       s.fuel = Math.min(FIRE.maxFuel, s.fuel + p.item.count * GAS_FUEL);
+      s.stats.gas += p.item.count;
       p.item = null;
       this.events.push({ type: 'fuel', slot: p.slot, x: 0, z: 0 });
       return;
@@ -1208,7 +1315,7 @@ export class Sim {
     if (s.spawnTimer > 0) return;
     const alive = s.creatures.filter((c) => !c.flee).length;
     if (alive >= CREATURE.maxAlive) return;
-    const window = PHASE_TIME.night * CREATURE.spawnWindow;
+    const window = phaseLength('night', s.night) * CREATURE.spawnWindow;
     s.spawnTimer = window / Math.max(1, s.spawnLeft + 1);
     for (let tries = 0; tries < 12; tries++) {
       const pt = this.world.randomShorePoint(() => this.random());
@@ -1293,7 +1400,7 @@ export class Sim {
         if (preyD - PLAYER.radius - CREATURE.radius < CREATURE.attackRange && c.cd <= 0) {
           c.cd = CREATURE.attackCooldown;
           c.attackT = 0;
-          this.damagePlayer(prey, CREATURE.damage, true);
+          this.damagePlayer(prey, CREATURE.damage * (0.5 + 0.5 * easeCap(s.night)), true);
           this.events.push({ type: 'creatureAttack', x: c.x, z: c.z });
         }
       } else {
@@ -1356,7 +1463,7 @@ export class Sim {
     const s = this.state;
     const w = this.world;
     const players = Math.max(1, s.players.length);
-    const scale = (1 + 0.3 * (night - 1)) * (0.7 + 0.15 * players);
+    const scale = (1 + 0.3 * (night - 1)) * (0.7 + 0.15 * players) * Math.max(0.5, easeCap(night));
     const perBlock = new Array<number>(w.city.blocks.length).fill(0);
     let city = 0;
     for (const z of s.zombies) {
@@ -1412,7 +1519,7 @@ export class Sim {
     if (s.phase !== 'night' || s.hordeLeft <= 0) return;
     s.hordeTimer -= DT;
     if (s.hordeTimer > 0) return;
-    s.hordeTimer = (PHASE_TIME.night * 0.45) / Math.max(1, s.hordeLeft + 1);
+    s.hordeTimer = (phaseLength('night', s.night) * 0.45) / Math.max(1, s.hordeLeft + 1);
     if (s.zombies.length >= ZOMBIE.max) return;
     const c = this.world.city;
     const mid = (CITY.roadCells * c.cell) / 2;
@@ -1451,7 +1558,7 @@ export class Sim {
       z.wanderT -= DT;
       if (z.hurtT < 0.2) continue; // staggered by a hit
 
-      const aggro = (night ? ZOMBIE.aggroNight : ZOMBIE.aggroDay) * (z.alertT > 0 ? 2 : 1);
+      const aggro = (night ? ZOMBIE.aggroNight : ZOMBIE.aggroDay) * (0.7 + 0.3 * easeCap(s.night)) * (z.alertT > 0 ? 2 : 1);
       let prey: PlayerState | null = null;
       let preyD = aggro;
       for (const p of s.players) {
@@ -1475,7 +1582,7 @@ export class Sim {
           if (z.cd <= 0) {
             z.cd = ZOMBIE.attackCooldown;
             z.attackT = 0;
-            this.damagePlayer(prey, ZOMBIE.damage, true);
+            this.damagePlayer(prey, ZOMBIE.damage * (0.5 + 0.5 * easeCap(s.night)), true);
             this.events.push({ type: 'zombieAttack', x: z.x, z: z.z });
           }
         }
@@ -1688,6 +1795,10 @@ export class Sim {
         else if (c === 'Wall') hint = 'C: build a wall';
         else if (s.phase === 'night' && !this.inLight(p.x, p.z)) hint = 'Stay near the light!';
         else if (s.fuel < 30) hint = 'The fire needs wood!';
+      }
+      if (!hint) {
+        const goal = this.currentGoal();
+        if (goal) hint = `🎯 ${goal.text}`.slice(0, 48);
       }
     }
 

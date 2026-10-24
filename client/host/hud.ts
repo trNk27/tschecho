@@ -1,7 +1,7 @@
 // HTML overlay on top of the split screen: per-viewport frames, the shared
 // strip across the centre, phase banners and the 4th-cell mini-map.
 
-import { FIRE, PHASE_TIME, TORCH } from './game/config';
+import { FIRE, TORCH, phaseLength } from './game/config';
 import type { Layout } from './game/layout';
 import type { PlayerState, Sim } from './game/sim';
 import type { World } from './game/world';
@@ -108,7 +108,9 @@ export class Hud {
       f.area.className = `area tier${p.area}`;
       f.food.style.transform = `scaleX(${p.food / 100})`;
       const hud = sim.hudFor(slot);
-      f.hint.textContent = p.downed ? '' : (hud?.hint ?? '');
+      // Goals already show in the shared pill at the top.
+      const hint = hud?.hint ?? '';
+      f.hint.textContent = p.downed || hint.startsWith('🎯') ? '' : hint;
       const prog = hud?.progress ?? 0;
       f.progress.classList.toggle('on', prog > 0 && !p.downed);
       f.progressBar.style.transform = `scaleX(${prog})`;
@@ -148,10 +150,10 @@ export class Hud {
     $('strip-phase').textContent = `${phaseName} / ${s.nights}`;
     const left =
       s.phase === 'day'
-        ? `Dusk in ${fmtTime(PHASE_TIME.day - s.phaseTime)}`
+        ? `Dusk in ${fmtTime(phaseLength('day', s.night) - s.phaseTime)}`
         : s.phase === 'dusk'
-          ? `Night in ${fmtTime(PHASE_TIME.dusk - s.phaseTime)}`
-          : `Dawn in ${fmtTime(PHASE_TIME.night - s.phaseTime)}`;
+          ? `Night in ${fmtTime(phaseLength('dusk', s.night) - s.phaseTime)}`
+          : `Dawn in ${fmtTime(phaseLength('night', s.night) - s.phaseTime)}`;
     $('strip-time').textContent = left;
     const fuel = s.fuel / FIRE.maxFuel;
     for (const id of ['strip-fuel', 'extra-fuel']) {
@@ -160,6 +162,13 @@ export class Hud {
       bar.parentElement!.classList.toggle('low', fuel < 0.25);
     }
     $('paused').hidden = !paused;
+
+    // Guided goals during the first days.
+    const goal = sim.currentGoal();
+    const goalEl = $('goal');
+    goalEl.hidden = !goal;
+    goalEl.classList.toggle('center', slots.length >= 3);
+    if (goal) goalEl.textContent = `🎯 ${goal.text}  (${goal.index}/${goal.total})`;
 
     // Fourth cell (3 players): mini-map + fire status.
     const extra = $('extra-cell');

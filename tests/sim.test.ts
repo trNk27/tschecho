@@ -22,14 +22,23 @@ function run(sim: Sim, seconds: number, each?: () => void): void {
   }
 }
 
-/** Steer a player towards a point using joystick input (y up = world -z). */
+/** Joystick values that move a player in a world direction, given their camera yaw. */
+function stick(sim: Sim, slot: number, dx: number, dz: number): [number, number] {
+  const yaw = sim.player(slot)!.camYaw;
+  const fx = Math.sin(yaw);
+  const fz = Math.cos(yaw);
+  // forward = (fx, fz), right = (-fz, fx)
+  return [dx * -fz + dz * fx, dx * fx + dz * fz];
+}
+
+/** Steer a player towards a point using camera-relative joystick input. */
 function steer(sim: Sim, slot: number, x: number, z: number, b = 0): number {
   const p = sim.player(slot)!;
   const dx = x - p.x;
   const dz = z - p.z;
   const d = Math.hypot(dx, dz);
   if (d < 0.3) sim.setInput(slot, 0, 0, b);
-  else sim.setInput(slot, dx / d, -dz / d, b);
+  else sim.setInput(slot, ...stick(sim, slot, dx / d, dz / d), b);
   return d;
 }
 
@@ -48,9 +57,10 @@ test('joystick input is clamped on the laptop', () => {
   const sim = newSim();
   const p = sim.player(1)!;
   const x0 = p.x;
+  const z0 = p.z;
   sim.setInput(1, 50, 0, 0);
   sim.step();
-  assert.ok(p.x - x0 <= 5.4 / TICK_HZ + 1e-6, 'cannot move faster than max speed');
+  assert.ok(Math.hypot(p.x - x0, p.z - z0) <= 5.4 / TICK_HZ + 1e-6, 'cannot move faster than max speed');
 });
 
 test('chop a tree, carry wood back and feed the fire', () => {
@@ -153,8 +163,9 @@ test('downed players can be revived by holding A', () => {
   assert.ok(b.hp > 0);
 });
 
-test('everyone downed ends the run', () => {
+test('everyone downed ends the run (after the first three nights)', () => {
   const sim = newSim(1);
+  sim.state.night = 4;
   sim.player(1)!.food = 0;
   sim.player(1)!.hp = 1;
   run(sim, 2);
@@ -225,7 +236,7 @@ test('buildings block movement', () => {
   sim.state.zombies.length = 0;
   p.x = b.x0 - 1;
   p.z = (b.z0 + b.z1) / 2;
-  run(sim, 2, () => sim.setInput(1, 1, 0, 0)); // walk east into the wall
+  run(sim, 2, () => sim.setInput(1, ...stick(sim, 1, 1, 0), 0)); // walk east into the wall
   assert.ok(p.x <= b.x0 - 0.4 + 1e-6, `stopped at the wall (x=${p.x.toFixed(2)}, wall=${b.x0.toFixed(2)})`);
 });
 
@@ -292,6 +303,7 @@ test('the night horde marches on the camp and stamps on the fire', () => {
   const p = sim.player(1)!;
   p.connected = false; // nobody to chase: the horde goes straight for the fire
   sim.state.zombies.length = 0;
+  sim.state.night = 4;
   sim.state.phase = 'dusk';
   sim.state.phaseTime = PHASE_TIME.dusk - 0.05;
   let horde = 0;
@@ -320,4 +332,74 @@ test('the city refills with more zombies every day', () => {
   assert.ok(sim.state.zombies.length > day1, `${sim.state.zombies.length} > ${day1}`);
   assert.ok(sim.state.zombies.length <= ZOMBIE.max);
   assert.ok(sim.state.zombies[0].hp > ZOMBIE.hp, 'tougher later on');
+});
+
+// ---------------------------------------------------------------------------
+// Camera and the easy first days
+// ---------------------------------------------------------------------------
+
+test('joystick up walks forward, away from the camera, and the camera follows a turn', () => {
+  const sim = newSim(1);
+  sim.state.zombies.length = 0;
+  const p = sim.player(1)!;
+  p.x = p.px = -8;
+  p.z = p.pz = -6;
+  const yaw0 = p.camYaw;
+  const x0 = p.x;
+  const z0 = p.z;
+  run(sim, 0.5, () => sim.setInput(1, 0, 1, 0));
+  const fwd = (p.x - x0) * Math.sin(yaw0) + (p.z - z0) * Math.cos(yaw0);
+  assert.ok(fwd > 2, `moved forward ${fwd.toFixed(2)}`);
+  assert.ok(Math.abs(p.camYaw - yaw0) < 0.01, 'walking straight does not turn the camera');
+  run(sim, 2, () => sim.setInput(1, 1, 0, 0)); // hold right
+  assert.ok(Math.abs(p.camYaw - yaw0) > 0.5, 'camera swings round behind the new direction');
+});
+
+test('the first three days are gentle: no horde on night 1, a wipe is not game over', () => {
+  const sim = newSim(1);
+  sim.state.phase = 'dusk';
+  sim.state.phaseTime = 19.99;
+  run(sim, 0.1);
+  assert.equal(sim.state.phase, 'night');
+  assert.equal(sim.state.hordeLeft, 0, 'no horde on the first night');
+  assert.ok(sim.state.spawnLeft <= 2, `creatures on night 1: ${sim.state.spawnLeft}`);
+
+  const p = sim.player(1)!;
+  p.hp = 0;
+  p.downed = true;
+  const fuel = sim.state.fuel;
+  sim.step();
+  assert.equal(sim.state.over, null);
+  assert.equal(p.downed, false);
+  assert.ok(Math.hypot(p.x, p.z) < 4, 'woke up by the fire');
+  assert.ok(sim.state.fuel < fuel, 'it cost fuel');
+});
+
+test('difficulty ramps up after day 3', () => {
+  const nightCreatures = (night: number) => {
+    const sim = newSim(2);
+    sim.state.night = night;
+    sim.state.phase = 'dusk';
+    sim.state.phaseTime = 19.99;
+    run(sim, 0.1);
+    return { creatures: sim.state.spawnLeft, horde: sim.state.hordeLeft };
+  };
+  const n = [1, 2, 3, 4, 5].map(nightCreatures);
+  for (let i = 1; i < n.length; i++) {
+    assert.ok(n[i].creatures >= n[i - 1].creatures, `creatures night ${i + 1}`);
+    assert.ok(n[i].horde >= n[i - 1].horde, `horde night ${i + 1}`);
+  }
+  assert.ok(n[4].horde >= n[2].horde * 2, `night 5 horde ${n[4].horde} vs night 3 ${n[2].horde}`);
+});
+
+test('guided goals complete as the mechanics are used', () => {
+  const sim = newSim(1);
+  assert.match(sim.currentGoal()!.text, /Chop a tree/);
+  sim.state.stats.chopped = 1;
+  sim.step();
+  const done = sim.events.find((e) => e.type === 'goal');
+  assert.ok(done, 'goal event');
+  assert.match(sim.currentGoal()!.text, /fire/);
+  sim.state.night = 4;
+  assert.equal(sim.currentGoal(), null, 'no goals after day 3');
 });

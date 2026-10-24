@@ -127,3 +127,32 @@ export const AMMO_PICKUP = 10;
 export const GAS_FUEL = 22;
 export const CAN_FOOD = 45;
 export const MAX_GEAR_ON_GROUND = 30;
+
+// ---------------------------------------------------------------------------
+// Difficulty curve: the first three days are an easy introduction
+// ---------------------------------------------------------------------------
+
+export const GENTLE_NIGHTS = 3;
+
+/** Difficulty multiplier per night: gentle for days 1-3, then it ramps up. */
+export function ease(night: number): number {
+  if (night <= GENTLE_NIGHTS) return [0.35, 0.55, 0.75][Math.max(0, night - 1)];
+  return 1 + 0.25 * (night - GENTLE_NIGHTS - 1);
+}
+
+/** Same as ease() but never above 1 (for damage and ranges). */
+export const easeCap = (night: number) => Math.min(1, ease(night));
+
+/** Day 1 is longer so everyone can find their feet. */
+export function phaseLength(phase: 'day' | 'dusk' | 'night', night: number): number {
+  return phase === 'day' && night === 1 ? 150 : PHASE_TIME[phase];
+}
+
+export const CAMERA = {
+  distance: 7.6, // behind the player
+  height: 3.9,
+  lookAhead: 4,
+  fov: 62,
+  /** How fast the camera swings round behind the walking direction (per second). */
+  follow: 1.6,
+} as const;

@@ -1,7 +1,7 @@
 // Day/night colours and light levels.
 
 import * as THREE from 'three';
-import { DAWN_BLEND, PHASE_TIME } from './config';
+import { DAWN_BLEND, PHASE_TIME, phaseLength } from './config';
 import type { Phase } from './sim';
 
 interface Palette {
@@ -68,14 +68,15 @@ export interface Atmosphere extends Palette {
 const sunDir = new THREE.Vector3();
 
 /** `firstDay` skips the dawn blend at the very start of a run. */
-export function atmosphere(phase: Phase | 'lobby', phaseTime: number, firstDay: boolean): Atmosphere {
+export function atmosphere(phase: Phase | 'lobby', phaseTime: number, night: number): Atmosphere {
+  const firstDay = night === 1;
   let p: Palette;
   let dayFrac = 0.5;
   if (phase === 'lobby') {
     p = mix(GOLD, DUSK, 0.25);
     dayFrac = 0.85;
   } else if (phase === 'day') {
-    const end = PHASE_TIME.day;
+    const end = phaseLength('day', night);
     dayFrac = phaseTime / end;
     if (!firstDay && phaseTime < DAWN_BLEND) {
       const t = phaseTime / DAWN_BLEND;

@@ -5,7 +5,7 @@ import * as THREE from 'three';
 import { atmosphere } from './atmosphere';
 import { PlayerModel } from './characters';
 import { cityCellType } from './city';
-import { CITY, FIRE, MAX_GEAR_ON_GROUND, MAX_ITEMS_ON_GROUND, TORCH, WALL, WATER_LEVEL, ZOMBIE, type GearKind } from './config';
+import { CAMERA, CITY, FIRE, MAX_GEAR_ON_GROUND, MAX_ITEMS_ON_GROUND, TORCH, WALL, WATER_LEVEL, ZOMBIE, type GearKind } from './config';
 import type { Rect } from './layout';
 import {
   BERRY_OFFSETS,
@@ -240,7 +240,14 @@ class Particles {
     this.geo.setAttribute('position', new THREE.BufferAttribute(this.pos, 3).setUsage(THREE.DynamicDrawUsage));
     this.geo.setAttribute('color', new THREE.BufferAttribute(this.col, 3).setUsage(THREE.DynamicDrawUsage));
     this.geo.boundingSphere = new THREE.Sphere(new THREE.Vector3(), 1e4);
-    const mat = new THREE.PointsMaterial({ size: 0.2, vertexColors: true, sizeAttenuation: true });
+    const mat = new THREE.PointsMaterial({
+      size: 0.22,
+      vertexColors: true,
+      sizeAttenuation: true,
+      map: radialTexture('rgba(255,255,255,1)', 'rgba(255,255,255,0)'),
+      transparent: true,
+      depthWrite: false,
+    });
     this.points = new THREE.Points(this.geo, mat);
     this.points.frustumCulled = false;
   }
@@ -327,6 +334,8 @@ function setInst(
 interface View {
   cam: THREE.PerspectiveCamera;
   target: THREE.Vector3;
+  yaw: number;
+  dist: number;
   init: boolean;
 }
 
@@ -608,7 +617,8 @@ export class GameRenderer {
       eGeo,
       new THREE.PointsMaterial({
         color: '#ffb35c',
-        size: 0.12,
+        size: 0.09,
+        map: radialTexture('rgba(255,255,255,1)', 'rgba(255,255,255,0)'),
         transparent: true,
         blending: THREE.AdditiveBlending,
         depthWrite: false,
@@ -1433,7 +1443,7 @@ export class GameRenderer {
   private view(slot: number): View {
     let v = this.views.get(slot);
     if (!v) {
-      v = { cam: new THREE.PerspectiveCamera(50, 1, 0.5, 64), target: new THREE.Vector3(), init: false };
+      v = { cam: new THREE.PerspectiveCamera(CAMERA.fov, 1, 0.3, 72), target: new THREE.Vector3(), yaw: 0, dist: CAMERA.distance, init: false };
       this.views.set(slot, v);
     }
     return v;
@@ -1447,8 +1457,7 @@ export class GameRenderer {
     U.uTime.value = time;
 
     // Atmosphere.
-    const firstDay = state.night === 1 && state.phase === 'day';
-    const atm = atmosphere(f.phase, f.phase === 'lobby' ? 0 : state.phaseTime, firstDay);
+    const atm = atmosphere(f.phase, f.phase === 'lobby' ? 0 : state.phaseTime, state.night);
     (this.scene.background as THREE.Color).copy(atm.sky);
     this.fog.color.copy(atm.sky);
     this.fog.near = atm.fogNear;
@@ -1502,24 +1511,38 @@ export class GameRenderer {
       const px = p ? p.px + (p.x - p.px) * alpha : 0;
       const pz = p ? p.pz + (p.z - p.pz) * alpha : 0;
       const py = world.heightAt(px, pz);
+      const camYaw = p?.camYaw ?? 0;
       if (!v.init) {
         v.target.set(px, py, pz);
+        v.yaw = camYaw;
         v.init = true;
       }
-      const k = 1 - Math.exp(-dt * 6);
+      const k = 1 - Math.exp(-dt * 10);
       v.target.x += (px - v.target.x) * k;
-      v.target.y += (py - v.target.y) * k;
+      v.target.y += (py - v.target.y) * (1 - Math.exp(-dt * 5));
       v.target.z += (pz - v.target.z) * k;
+      let dy = camYaw - v.yaw;
+      dy = Math.atan2(Math.sin(dy), Math.cos(dy));
+      v.yaw += dy * (1 - Math.exp(-dt * 8));
 
       const aspect = rect.w / Math.max(1, rect.h);
-      const zoom = aspect < 1 ? 1 + (1 - aspect) * 0.6 : 1;
+      const zoom = aspect < 1 ? 1 + (1 - aspect) * 0.35 : 1;
       const cam = v.cam;
       if (cam.aspect !== aspect) {
         cam.aspect = aspect;
         cam.updateProjectionMatrix();
       }
-      cam.position.set(v.target.x, v.target.y + 10.5 * zoom, v.target.z + 8.2 * zoom);
-      cam.lookAt(v.target.x, v.target.y + 0.6, v.target.z);
+      // Third person: behind and a little above the player, looking ahead.
+      const fx = Math.sin(v.yaw);
+      const fz = Math.cos(v.yaw);
+      const camH = CAMERA.height * zoom;
+      const want = this.cameraDistance(v.target.x, v.target.z, fx, fz, CAMERA.distance * zoom, v.target.y + camH);
+      v.dist += (want - v.dist) * (want < v.dist ? 1 - Math.exp(-dt * 20) : 1 - Math.exp(-dt * 3));
+      const cx = v.target.x - fx * v.dist;
+      const cz = v.target.z - fz * v.dist;
+      const cy = Math.max(v.target.y + camH * (0.55 + 0.45 * (v.dist / (CAMERA.distance * zoom))), world.heightAt(cx, cz) + 1.2);
+      cam.position.set(cx, cy, cz);
+      cam.lookAt(v.target.x + fx * CAMERA.lookAhead, v.target.y + 1.3, v.target.z + fz * CAMERA.lookAhead);
 
       U.uFocus.value.set(px, py + 0.9, pz);
       U.uCamPos.value.copy(cam.position);
@@ -1530,6 +1553,22 @@ export class GameRenderer {
       r.setScissor(rect.x, y, rect.w, rect.h);
       r.render(this.scene, cam);
     }
+  }
+
+  /** Pull the camera in when a building stands behind the player. */
+  private cameraDistance(x: number, z: number, fx: number, fz: number, max: number, camY: number): number {
+    const city = this.world!.city;
+    if (Math.abs(x - city.cx) > 40 || Math.abs(z - city.cz) > 40) return max;
+    for (let d = 1.6; d <= max; d += 0.4) {
+      const cx = x - fx * d;
+      const cz = z - fz * d;
+      for (const b of city.buildings) {
+        if (cx > b.x0 - 0.3 && cx < b.x1 + 0.3 && cz > b.z0 - 0.3 && cz < b.z1 + 0.3 && CITY.height + b.h > camY - 0.5) {
+          return Math.max(1.6, d - 0.4);
+        }
+      }
+    }
+    return max;
   }
 
   /** Give the 7 spare point lights to this viewport: player lanterns at night first, then the nearest torches. */

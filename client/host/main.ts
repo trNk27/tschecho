@@ -293,7 +293,7 @@ function startGame(): void {
   $('lobby').hidden = true;
   $('over').hidden = true;
   hud.show(true);
-  hud.banner('☀️ Day 1', 'Gather wood and keep the fire burning', 4000);
+  hud.banner('☀️ Day 1', 'Follow the goals at the top – the first days are easy', 4500);
   audio.play('dawn');
   broadcastState();
   saveSnapshot();
@@ -332,7 +332,7 @@ function saveSnapshot(): void {
 
 function tryRestoreSnapshot(): boolean {
   const snap = load<{ room: string; savedAt: number; state: SimState }>(sessionStorage, SNAP_KEY);
-  if (!snap || snap.room !== room || Date.now() - snap.savedAt > 90_000 || snap.state?.version !== 2) return false;
+  if (!snap || snap.room !== room || Date.now() - snap.savedAt > 90_000 || snap.state?.version !== 3) return false;
   try {
     world = new World(snap.state.seed);
     renderer.setWorld(world);
@@ -454,12 +454,24 @@ function handleEvents(): void {
         hud.banner('🧟 Zombies at the fire!', 'Drive them away before it goes out', 1800);
         break;
       case 'horde':
-        hud.banner('🧟 A horde is coming from the city!', 'Build walls and defend the fire', 3500);
+        hud.banner(
+          sim.state.night <= 2 ? '🧟 Zombies are coming from the city!' : '🧟 A horde is coming from the city!',
+          'Build walls and defend the fire',
+          3500,
+        );
         audio.play('horde');
         for (const p of sim.state.players) haptic(p.slot, 'alert');
         break;
       case 'area':
         if (e.area === 2) haptic(e.slot, 'alert');
+        break;
+      case 'goal':
+        hud.banner('✔ Goal done', e.last ? 'All goals for today done!' : e.text, 2200);
+        audio.play('gear');
+        break;
+      case 'rescue':
+        hud.banner('😵 You woke up by the fire', 'The first nights are forgiving – it cost some fuel', 4500);
+        audio.play('revived');
         break;
       case 'phase':
         if (e.phase === 'dusk') {
@@ -467,7 +479,12 @@ function handleEvents(): void {
           audio.play('dusk');
           for (const p of sim.state.players) haptic(p.slot, 'alert');
         } else if (e.phase === 'night') {
-          hud.banner(`🌙 Night ${e.night}`, 'Stay in the light. Keep the fire fed.');
+          const tips = [
+            'Creatures fear the light – stay inside the glowing ring',
+            'A few zombies are coming. They ignore light – fight them with A',
+            'Bigger horde tonight. Walls and weapons help',
+          ];
+          hud.banner(`🌙 Night ${e.night}`, tips[e.night - 1] ?? 'Stay in the light. Keep the fire fed.', 4500);
           audio.play('night');
         } else {
           if (!sim.state.over) hud.banner(`🌅 Dawn – Day ${e.night}`, `You survived night ${e.night - 1}!`);
