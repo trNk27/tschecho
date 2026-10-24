@@ -4,14 +4,28 @@
 import * as THREE from 'three';
 import { atmosphere } from './atmosphere';
 import { PlayerModel } from './characters';
-import { FIRE, MAX_ITEMS_ON_GROUND, TORCH, WALL, WATER_LEVEL } from './config';
+import { cityCellType } from './city';
+import { CITY, FIRE, MAX_GEAR_ON_GROUND, MAX_ITEMS_ON_GROUND, TORCH, WALL, WATER_LEVEL, ZOMBIE, type GearKind } from './config';
 import type { Rect } from './layout';
 import {
   BERRY_OFFSETS,
   berryGeometry,
   berryPileGeometry,
+  buildingGeometry,
   bushGeometry,
   campfireLogs,
+  carGeometry,
+  dashGeometry,
+  debrisGeometry,
+  dumpsterGeometry,
+  foodCanGeometry,
+  gasCanGeometry,
+  lampGeometry,
+  lootBagGeometry,
+  roofGeometry,
+  zombieBodyGeometry,
+  zombieEyesGeometry,
+  zombieLegGeometry,
   campfireStones,
   creatureBodyGeometry,
   creatureEyesGeometry,
@@ -60,7 +74,8 @@ export interface FrameInput {
 
 const MAX_LIGHTS = 8;
 const MAX_CREATURES = 34;
-const MAX_SHADOWS = 4 + MAX_CREATURES;
+const MAX_SHADOWS = 4 + MAX_CREATURES + ZOMBIE.max + MAX_ITEMS_ON_GROUND + MAX_GEAR_ON_GROUND;
+const MAX_TRACERS = 10;
 const MAX_PARTICLES = 320;
 const RING_SLOTS = 1 + TORCH.max;
 
@@ -75,6 +90,9 @@ const U = {
 
 interface PatchOpts {
   occlude?: boolean;
+  /** Radius (world units) of the see-through hole around the player. */
+  occludeR?: number;
+  windows?: boolean;
   rings?: boolean;
   wave?: boolean;
   sway?: boolean;
@@ -141,9 +159,35 @@ function patch<T extends THREE.Material>(mat: T, opts: PatchOpts): T {
            vec3 seg = uFocus - uCamPos;
            float t = clamp(dot(vEWorld - uCamPos, seg) / dot(seg, seg), 0.0, 1.0);
            float d = distance(vEWorld, uCamPos + seg * t);
-           float fade = smoothstep(2.6, 1.3, d) * smoothstep(1.0, 0.85, t);
+           float fade = smoothstep(${(opts.occludeR ?? 2.6).toFixed(2)}, ${((opts.occludeR ?? 2.6) / 2).toFixed(2)}, d) * smoothstep(1.0, 0.85, t);
            float ign = fract(52.9829189 * fract(dot(gl_FragCoord.xy, vec2(0.06711056, 0.00583715))));
            if (fade > ign * 0.9 + 0.05) discard;
+         }`,
+      );
+    }
+    if (opts.windows) {
+      // Procedural windows on building walls: dark, broken or boarded up, a few
+      // still flickering at night. Floors are 1.6 units tall.
+      fs = fs.replace(
+        '#include <emissivemap_fragment>',
+        `#include <emissivemap_fragment>
+         {
+           vec3 wn = normalize(cross(dFdx(vEWorld), dFdy(vEWorld)));
+           float ly = vEWorld.y - ${CITY.height.toFixed(2)};
+           if (abs(wn.y) < 0.5) {
+             float u = abs(wn.x) > 0.5 ? vEWorld.z : vEWorld.x;
+             float fy = fract(ly / 1.6);
+             float fu = fract(u / 1.3);
+             float win = step(0.3, fy) * step(fy, 0.78) * step(0.18, fu) * step(fu, 0.78) * step(0.4, ly);
+             vec2 cell = floor(vec2(u / 1.3, ly / 1.6));
+             float hsh = fract(sin(dot(cell, vec2(12.9898, 78.233)) + floor(vEWorld.x * 0.13) * 3.1 + floor(vEWorld.z * 0.13) * 7.7) * 43758.5453);
+             vec3 glass = mix(vec3(0.04, 0.05, 0.06), vec3(0.2, 0.25, 0.28), step(0.45, hsh));
+             glass = mix(glass, vec3(0.36, 0.25, 0.15), step(0.82, hsh) * (1.0 - step(0.94, hsh)));
+             diffuseColor.rgb = mix(diffuseColor.rgb, glass, win);
+             float lit = step(0.955, hsh) * uNight * (0.7 + 0.3 * sin(uTime * 6.0 + hsh * 60.0));
+             totalEmissiveRadiance += vec3(1.0, 0.68, 0.3) * win * lit;
+           }
+           diffuseColor.rgb *= mix(0.62, 1.0, smoothstep(0.0, 2.2, ly));
          }`,
       );
     }
@@ -170,6 +214,17 @@ function patch<T extends THREE.Material>(mat: T, opts: PatchOpts): T {
   };
   return mat;
 }
+
+const GEAR_COLOR: Record<GearKind, string> = {
+  bat: '#c49a6c',
+  machete: '#ced4da',
+  pistol: '#343a40',
+  jacket: '#8b5a2b',
+  armor: '#3b5bdb',
+  ammo: '#f2c94c',
+};
+
+const CAR_COLORS = ['#7d3434', '#34507d', '#666666', '#94805a', '#466646', '#c9c4b7', '#2b2b2b', '#82623a'];
 
 class Particles {
   readonly points: THREE.Points;
@@ -308,10 +363,20 @@ export class GameRenderer {
   private players = new Map<number, PlayerModel>();
   private creatureBody: THREE.InstancedMesh;
   private creatureEyes: THREE.InstancedMesh;
+  private zombieBody: THREE.InstancedMesh;
+  private zombieLegs: THREE.InstancedMesh[];
+  private zombieEyes: THREE.InstancedMesh;
+  private gearBags: THREE.InstancedMesh;
+  private tracers: THREE.LineSegments;
+  private tracerLife = new Float32Array(MAX_TRACERS);
+  private tracerNext = 0;
+  private cars: THREE.InstancedMesh | null = null;
+  private crates: THREE.InstancedMesh | null = null;
+  private lastContainers: number[] = [];
   private torchSticks: THREE.InstancedMesh;
   private torchFlames: THREE.InstancedMesh;
   private walls: THREE.InstancedMesh;
-  private items: Record<'wood' | 'stone' | 'berry', THREE.InstancedMesh>;
+  private items: Record<'wood' | 'stone' | 'berry' | 'fuel' | 'can', THREE.InstancedMesh>;
   private shadows: THREE.InstancedMesh;
   private rings: THREE.Mesh[] = [];
   private downRings: THREE.Mesh[] = [];
@@ -400,9 +465,44 @@ export class GameRenderer {
       wood: new THREE.InstancedMesh(logGeometry(), propMat, MAX_ITEMS_ON_GROUND),
       stone: new THREE.InstancedMesh(stonePileGeometry(), propMat, MAX_ITEMS_ON_GROUND),
       berry: new THREE.InstancedMesh(berryPileGeometry(), propMat, MAX_ITEMS_ON_GROUND),
+      fuel: new THREE.InstancedMesh(gasCanGeometry(), propMat, MAX_ITEMS_ON_GROUND),
+      can: new THREE.InstancedMesh(foodCanGeometry(), propMat, MAX_ITEMS_ON_GROUND),
     };
-    s.add(this.walls, this.items.wood, this.items.stone, this.items.berry);
+    s.add(this.walls, ...Object.values(this.items));
     for (const m of Object.values(this.items)) m.count = 0;
+
+    // Zombies: body, two legs and glowing eyes, one draw call each.
+    const zMat = new THREE.MeshLambertMaterial({ vertexColors: true, flatShading: true });
+    this.zombieBody = new THREE.InstancedMesh(zombieBodyGeometry(), zMat, ZOMBIE.max);
+    const legGeo = zombieLegGeometry();
+    this.zombieLegs = [0, 1].map(() => new THREE.InstancedMesh(legGeo, zMat, ZOMBIE.max));
+    this.zombieEyes = new THREE.InstancedMesh(
+      zombieEyesGeometry(),
+      new THREE.MeshBasicMaterial({ color: '#ff3b2f', fog: false, toneMapped: false }),
+      ZOMBIE.max,
+    );
+    for (let i = 0; i < ZOMBIE.max; i++) this.zombieBody.setColorAt(i, tmpC.set('#ffffff'));
+    for (const m of [this.zombieBody, this.zombieEyes, ...this.zombieLegs]) {
+      m.count = 0;
+      s.add(m);
+    }
+
+    // Loot bags (gear on the ground).
+    this.gearBags = new THREE.InstancedMesh(lootBagGeometry(), propMat, MAX_GEAR_ON_GROUND);
+    for (let i = 0; i < MAX_GEAR_ON_GROUND; i++) this.gearBags.setColorAt(i, tmpC.set('#ffffff'));
+    this.gearBags.count = 0;
+    s.add(this.gearBags);
+
+    // Gunshot tracers.
+    const tGeo = new THREE.BufferGeometry();
+    tGeo.setAttribute('position', new THREE.BufferAttribute(new Float32Array(MAX_TRACERS * 6), 3).setUsage(THREE.DynamicDrawUsage));
+    tGeo.setAttribute('color', new THREE.BufferAttribute(new Float32Array(MAX_TRACERS * 6), 3).setUsage(THREE.DynamicDrawUsage));
+    this.tracers = new THREE.LineSegments(
+      tGeo,
+      new THREE.LineBasicMaterial({ vertexColors: true, transparent: true, blending: THREE.AdditiveBlending, depthWrite: false, toneMapped: false }),
+    );
+    this.tracers.frustumCulled = false;
+    s.add(this.tracers);
 
     // Blob shadows.
     const shadowTex = radialTexture('rgba(0,0,0,0.55)', 'rgba(0,0,0,0)');
@@ -547,6 +647,7 @@ export class GameRenderer {
     this.buildTerrain(world);
     this.buildWater();
     this.buildProps(world);
+    this.buildCity(world);
     this.lastTrees = world.trees.map(() => -1);
     this.lastRocks = world.rocks.map(() => -1);
     this.lastBushes = world.bushes.map(() => -1);
@@ -564,6 +665,8 @@ export class GameRenderer {
     const grassB = new THREE.Color('#8cc25a');
     const forest = new THREE.Color('#3f7a36');
     const rock = new THREE.Color('#8c877e');
+    const asphalt = new THREE.Color('#3c3e43');
+    const concrete = new THREE.Color('#8a8780');
     const c = new THREE.Color();
 
     for (let cz = 0; cz < CH; cz++) {
@@ -598,7 +701,12 @@ export class GameRenderer {
               const hmin = Math.min(pos[start + 1], pos[start + 4], pos[start + 7]);
               const hmax = Math.max(pos[start + 1], pos[start + 4], pos[start + 7]);
               const steep = (hmax - hmin) / world.cell;
-              if (y < 0.15) {
+              const ct = cityCellType(world.city, x, z);
+              if (ct === 1) {
+                c.copy(asphalt).multiplyScalar(0.9 + fbm(x * 0.3, z * 0.3, world.seed + 7, 2) * 0.25);
+              } else if (ct === 2) {
+                c.copy(concrete).multiplyScalar(0.88 + fbm(x * 0.25, z * 0.25, world.seed + 8, 2) * 0.2);
+              } else if (y < 0.15) {
                 c.copy(wetSand).multiplyScalar(0.75 + 0.25 * smoothstep(-3, 0.1, y));
               } else if (y < 0.6) {
                 c.copy(sand).lerp(wetSand, smoothstep(0.45, 0.15, y) * 0.5);
@@ -758,8 +866,97 @@ export class GameRenderer {
   // Per-frame updates
   // -------------------------------------------------------------------------
 
+  private buildCity(world: World): void {
+    const city = world.city;
+    const gy = CITY.height;
+    const occluders = patch(new THREE.MeshLambertMaterial({ vertexColors: true, flatShading: true }), {
+      occlude: true,
+      occludeR: 4,
+      windows: true,
+    });
+    const roofMat = patch(new THREE.MeshLambertMaterial({ vertexColors: true, flatShading: true }), { occlude: true, occludeR: 4 });
+    const propMat = new THREE.MeshLambertMaterial({ vertexColors: true, flatShading: true });
+    const rnd = mulberry32(world.seed + 333);
+
+    const palettes = {
+      house: ['#d9cdb4', '#b8c7c9', '#c9b79c', '#a9b49a', '#d1b3a0'],
+      mid: ['#9a5b48', '#8a6f5a', '#b39c82', '#7d6a62', '#a8826a'],
+      down: ['#8d939a', '#a3a6a8', '#6f7d88', '#b1aca2', '#7f8b8f'],
+    };
+    const n = Math.max(1, city.buildings.length);
+    const buildings = new THREE.InstancedMesh(buildingGeometry(), occluders, n);
+    const roofs = new THREE.InstancedMesh(roofGeometry(), roofMat, n);
+    const bits = new THREE.InstancedMesh(buildingGeometry(), propMat, n * 2);
+    let roofN = 0;
+    let bitN = 0;
+    city.buildings.forEach((b, i) => {
+      const w = b.x1 - b.x0;
+      const d = b.z1 - b.z0;
+      const cx = (b.x0 + b.x1) / 2;
+      const cz = (b.z0 + b.z1) / 2;
+      setInst(buildings, i, cx, gy, cz, 0, w, b.h, d);
+      const pal = b.house ? palettes.house : b.tier === 2 ? palettes.down : palettes.mid;
+      tmpC.set(pal[Math.floor(b.shade * pal.length)]);
+      if (b.ruined) tmpC.multiplyScalar(0.55);
+      buildings.setColorAt(i, tmpC);
+      if (b.house) {
+        setInst(roofs, roofN, cx, gy + b.h, cz, w > d ? 0 : Math.PI / 2, w > d ? w : d, 1.4, w > d ? d : w);
+        roofs.setColorAt(roofN++, tmpC.set(['#7a3b2e', '#5a4a42', '#4a5560'][Math.floor(rnd() * 3)]));
+      } else if (!b.ruined) {
+        // Rooftop clutter: AC units and water tanks.
+        for (let k = 0; k < 2; k++) {
+          const s = 0.6 + rnd() * 0.6;
+          setInst(bits, bitN, b.x0 + 0.8 + rnd() * (w - 1.6), gy + b.h, b.z0 + 0.8 + rnd() * (d - 1.6), 0, s, s * 0.8, s);
+          bits.setColorAt(bitN++, tmpC.set(rnd() < 0.5 ? '#6c6f73' : '#9a9590'));
+        }
+      }
+    });
+    roofs.count = roofN;
+    bits.count = bitN;
+
+    const cars = new THREE.InstancedMesh(carGeometry(), propMat, Math.max(1, city.cars.length));
+    city.cars.forEach((c, i) => {
+      setInst(cars, i, c.x, gy, c.z, c.rot, 1, 1, 1, 0, c.tilt);
+      cars.setColorAt(i, tmpC.set(CAR_COLORS[c.color]));
+    });
+    cars.count = city.cars.length;
+    const crates = new THREE.InstancedMesh(dumpsterGeometry(), propMat, Math.max(1, city.crates.length));
+    city.crates.forEach((c, i) => {
+      setInst(crates, i, c.x, gy, c.z, c.rot, 1);
+      crates.setColorAt(i, tmpC.setRGB(1, 1, 1));
+    });
+    crates.count = city.crates.length;
+    this.cars = cars;
+    this.crates = crates;
+    this.lastContainers = [];
+
+    const lamps = new THREE.InstancedMesh(lampGeometry(), propMat, Math.max(1, city.lamps.length));
+    city.lamps.forEach((l, i) => {
+      if (l.scale < 0) setInst(lamps, i, l.x, gy + 0.1, l.z, l.rot, 1, 1, 1, 0, Math.PI / 2 - 0.05);
+      else setInst(lamps, i, l.x, gy, l.z, l.rot, 1);
+    });
+    const dashMat = new THREE.MeshLambertMaterial({
+      vertexColors: true,
+      polygonOffset: true,
+      polygonOffsetFactor: -1,
+      polygonOffsetUnits: -1,
+    });
+    const dashes = new THREE.InstancedMesh(dashGeometry(), dashMat, Math.max(1, city.dashes.length));
+    city.dashes.forEach((d, i) => setInst(dashes, i, d.x, gy + 0.015, d.z, d.rot, 1));
+    const rubble = new THREE.InstancedMesh(debrisGeometry(), propMat, Math.max(1, city.rubble.length));
+    city.rubble.forEach((r, i) => setInst(rubble, i, r.x, gy, r.z, r.rot, r.scale * 1.6, r.scale * 1.2, r.scale * 1.6));
+
+    this.worldGroup.add(buildings, roofs, bits, cars, crates, lamps, dashes, rubble);
+  }
+
   /** One-off effects for simulation events. */
-  fx(kind: 'chop' | 'mine' | 'fuel' | 'hit' | 'die' | 'build' | 'eat' | 'wall' | 'spawn' | 'burn', x: number, z: number): void {
+  fx(
+    kind: 'chop' | 'mine' | 'fuel' | 'hit' | 'die' | 'build' | 'eat' | 'wall' | 'spawn' | 'burn' | 'shot' | 'zhit' | 'zdie' | 'search' | 'trample',
+    x: number,
+    z: number,
+    tx = 0,
+    tz = 0,
+  ): void {
     if (!this.world) return;
     const y = this.world.heightAt(x, z);
     switch (kind) {
@@ -791,6 +988,31 @@ export class GameRenderer {
         break;
       case 'wall':
         this.particles.burst(x, y + 0.8, z, '#9b968e', 8, 3, 3);
+        break;
+      case 'shot': {
+        const i = this.tracerNext;
+        this.tracerNext = (i + 1) % MAX_TRACERS;
+        const pos = this.tracers.geometry.attributes.position as THREE.BufferAttribute;
+        pos.setXYZ(i * 2, x, y + 1.05, z);
+        pos.setXYZ(i * 2 + 1, tx, this.world.heightAt(tx, tz) + 0.95, tz);
+        pos.needsUpdate = true;
+        this.tracerLife[i] = 1;
+        this.particles.burst(x, y + 1.05, z, '#ffd166', 4, 1.5, 1);
+        break;
+      }
+      case 'zhit':
+        this.particles.burst(x, y + 1.0, z, '#6b1d1d', 10, 3, 3);
+        break;
+      case 'zdie':
+        this.particles.burst(x, y + 0.8, z, '#5a1414', 16, 3.5, 3);
+        this.particles.burst(x, y + 0.8, z, '#6d7f8c', 8, 3, 3);
+        break;
+      case 'search':
+        this.particles.burst(x, y + 0.9, z, '#e9ecef', 10, 2, 3);
+        break;
+      case 'trample':
+        this.particles.burst(0, this.fireY + 0.4, 0, '#ff8c2a', 10, 2.5, 3);
+        this.particles.burst(0, this.fireY + 0.4, 0, '#333', 6, 2, 2);
         break;
       case 'spawn':
         this.particles.burst(x, y + 0.3, z, '#1c1426', 10, 1.5, 2);
@@ -951,6 +1173,8 @@ export class GameRenderer {
         hurtT: p.hurtT,
         time,
         dt,
+        weapon: p.weapon ?? '',
+        armor: p.armor ?? '',
       });
       shadow(x, z, 1.1);
       const dr = this.downRings[p.slot - 1];
@@ -1042,7 +1266,7 @@ export class GameRenderer {
     if (this.walls.instanceColor) this.walls.instanceColor.needsUpdate = true;
 
     // Dropped items.
-    const counts = { wood: 0, stone: 0, berry: 0 };
+    const counts = { wood: 0, stone: 0, berry: 0, fuel: 0, can: 0 };
     for (const it of state.items) {
       const mesh = this.items[it.type];
       const i = counts[it.type]++;
@@ -1051,10 +1275,93 @@ export class GameRenderer {
       setInst(mesh, i, it.x, h(it.x, it.z) + 0.05 + bob, it.z, time * 0.8 + it.id, 1.1);
       shadow(it.x, it.z, 0.9);
     }
-    for (const type of ['wood', 'stone', 'berry'] as const) {
+    for (const type of ['wood', 'stone', 'berry', 'fuel', 'can'] as const) {
       this.items[type].count = Math.min(counts[type], MAX_ITEMS_ON_GROUND);
       this.items[type].instanceMatrix.needsUpdate = true;
     }
+
+    // Loot bags.
+    const gear = state.gear ?? [];
+    const gn = Math.min(gear.length, MAX_GEAR_ON_GROUND);
+    for (let i = 0; i < gn; i++) {
+      const g = gear[i];
+      const pulse = 1 + Math.sin(time * 5 + g.id) * 0.08;
+      setInst(this.gearBags, i, g.x, h(g.x, g.z) + 0.08 + Math.sin(time * 3 + g.id) * 0.07, g.z, time * 1.2 + g.id, pulse);
+      this.gearBags.setColorAt(i, tmpC.set(GEAR_COLOR[g.kind]));
+      shadow(g.x, g.z, 0.9);
+    }
+    this.gearBags.count = gn;
+    this.gearBags.instanceMatrix.needsUpdate = true;
+    if (this.gearBags.instanceColor) this.gearBags.instanceColor.needsUpdate = true;
+
+    // Zombies.
+    const zs = state.zombies ?? [];
+    const zn = Math.min(zs.length, ZOMBIE.max);
+    for (let i = 0; i < zn; i++) {
+      const zb = zs[i];
+      const x = zb.px + (zb.x - zb.px) * alpha;
+      const z = zb.pz + (zb.z - zb.pz) * alpha;
+      const moving = Math.hypot(zb.x - zb.px, zb.z - zb.pz) > 0.004;
+      const ph = moving ? time * (zb.horde ? 7 : 5) + zb.id : 0;
+      const yaw = Math.atan2(zb.fx, zb.fz);
+      const rise = Math.min(1, zb.age / 0.9);
+      const lunge = zb.attackT < 0.35 ? Math.sin((zb.attackT / 0.35) * Math.PI) * 0.45 : 0;
+      const y = h(x, z) - (1 - rise) * 1.7;
+      tmpE.set(0.15 + lunge, yaw, Math.sin(ph) * 0.09, 'YXZ');
+      tmpQ.setFromEuler(tmpE);
+      tmpM.compose(tmpP.set(x, y, z), tmpQ, tmpS.set(1, 1, 1));
+      this.zombieBody.setMatrixAt(i, tmpM);
+      this.zombieEyes.setMatrixAt(i, tmpM);
+      // Legs: hip offset in the body's yaw frame, swinging opposite.
+      for (let k = 0; k < 2; k++) {
+        const side = k === 0 ? 0.12 : -0.12;
+        const swing = Math.sin(ph + k * Math.PI) * 0.5;
+        tmpE.set(swing, yaw, 0, 'YXZ');
+        tmpQ.setFromEuler(tmpE);
+        tmpP.set(x + Math.cos(yaw) * side, y + 0.72, z - Math.sin(yaw) * side);
+        tmpM.compose(tmpP, tmpQ, tmpS.set(1, 1, 1));
+        this.zombieLegs[k].setMatrixAt(i, tmpM);
+      }
+      const hurt = Math.max(0, 1 - zb.hurtT / 0.25);
+      const v = 0.75 + zb.shade * 0.45;
+      this.zombieBody.setColorAt(i, tmpC.setRGB(v * (0.9 + zb.shade * 0.2) + hurt * 2.5, v + hurt * 1.2, v * (1.1 - zb.shade * 0.3) + hurt * 1.2));
+      shadow(x, z, 1.0 * rise);
+    }
+    for (const m of [this.zombieBody, this.zombieEyes, ...this.zombieLegs]) {
+      m.count = zn;
+      m.instanceMatrix.needsUpdate = true;
+    }
+    if (this.zombieBody.instanceColor) this.zombieBody.instanceColor.needsUpdate = true;
+
+    // Searched cars and crates look emptied out.
+    const cont = state.containers ?? [];
+    let contDirty = false;
+    for (let i = 0; i < cont.length; i++) {
+      if (cont[i] === this.lastContainers[i]) continue;
+      this.lastContainers[i] = cont[i];
+      contDirty = true;
+      const c = world.city.containers[i];
+      const dim = cont[i] ? 1 : 0.5;
+      if (c.kind === 'car' && this.cars) {
+        this.cars.setColorAt(c.ref, tmpC.set(CAR_COLORS[world.city.cars[c.ref].color]).multiplyScalar(dim));
+      } else if (this.crates) {
+        this.crates.setColorAt(c.ref, tmpC.setRGB(dim, dim, dim));
+      }
+    }
+    if (contDirty) {
+      if (this.cars?.instanceColor) this.cars.instanceColor.needsUpdate = true;
+      if (this.crates?.instanceColor) this.crates.instanceColor.needsUpdate = true;
+    }
+
+    // Tracers fade out quickly.
+    const tCol = this.tracers.geometry.attributes.color as THREE.BufferAttribute;
+    for (let i = 0; i < MAX_TRACERS; i++) {
+      this.tracerLife[i] = Math.max(0, this.tracerLife[i] - dt * 7);
+      const l = this.tracerLife[i];
+      tCol.setXYZ(i * 2, l, l * 0.85, l * 0.4);
+      tCol.setXYZ(i * 2 + 1, l * 0.6, l * 0.5, l * 0.2);
+    }
+    tCol.needsUpdate = true;
 
     this.shadows.count = shadowN;
     this.shadows.instanceMatrix.needsUpdate = true;
@@ -1216,7 +1523,7 @@ export class GameRenderer {
 
       U.uFocus.value.set(px, py + 0.9, pz);
       U.uCamPos.value.copy(cam.position);
-      this.assignTorchLights(state, px, pz, time);
+      this.assignTorchLights(state, px, pz, time, alpha);
 
       const y = H - rect.y - rect.h; // WebGL origin is bottom-left
       r.setViewport(rect.x, y, rect.w, rect.h);
@@ -1225,21 +1532,38 @@ export class GameRenderer {
     }
   }
 
-  /** Give the 7 spare point lights to the torches nearest this viewport. */
-  private assignTorchLights(state: SimState, x: number, z: number, time: number): void {
+  /** Give the 7 spare point lights to this viewport: player lanterns at night first, then the nearest torches. */
+  private assignTorchLights(state: SimState, x: number, z: number, time: number, alpha = 1): void {
+    const world = this.world!;
+    const night = U.uNight.value;
+    let li = 1;
+    if (night > 0.05) {
+      for (const p of state.players) {
+        if (li >= MAX_LIGHTS) break;
+        const px = p.px + (p.x - p.px) * alpha;
+        const pz = p.pz + (p.z - p.pz) * alpha;
+        if ((px - x) ** 2 + (pz - z) ** 2 > 45 * 45) continue;
+        const l = this.lights[li++];
+        l.position.set(px + p.fx * 0.4, world.heightAt(px, pz) + 1.7, pz + p.fz * 0.4);
+        l.color.set('#ffd9a0');
+        l.intensity = (p.downed ? 1.2 : 2.6) * night;
+        l.distance = 8;
+      }
+    }
     const torches = state.torches
       .map((t) => ({ t, d: (t.x - x) ** 2 + (t.z - z) ** 2 }))
       .sort((a, b) => a.d - b.d);
-    for (let i = 1; i < MAX_LIGHTS; i++) {
-      const l = this.lights[i];
-      const e = torches[i - 1];
+    for (let k = 0; li < MAX_LIGHTS; li++, k++) {
+      const l = this.lights[li];
+      const e = torches[k];
       if (!e || e.d > 45 * 45) {
         l.intensity = 0;
         continue;
       }
       const t = e.t;
       const grow = Math.min(1, t.age / 0.4);
-      l.position.set(t.x, this.world!.heightAt(t.x, t.z) + 1.9, t.z);
+      l.color.set('#ff9a4a');
+      l.position.set(t.x, world.heightAt(t.x, t.z) + 1.9, t.z);
       l.intensity = (5.5 + Math.sin(time * 15 + t.id) * 0.5) * grow;
       l.distance = TORCH.radius * 2.1;
     }

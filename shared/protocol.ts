@@ -41,6 +41,7 @@ export const hudSchema = z
       .strict()
       .nullable(),
     hint: z.string().max(48),
+    gear: z.string().max(24),
     a: label,
     b: label,
     c: label,
@@ -156,6 +157,7 @@ export interface HudPayload {
   food: number;
   item: { type: ItemType; count: number } | null;
   hint: string;
+  gear: string;
   a: string;
   b: string;
   c: string;

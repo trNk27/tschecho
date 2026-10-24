@@ -224,7 +224,7 @@ input:focus {
   left: max(12px, env(safe-area-inset-left));
   right: max(12px, env(safe-area-inset-right));
   display: grid;
-  grid-template-columns: minmax(110px, 22%) 1fr minmax(80px, 16%);
+  grid-template-columns: minmax(110px, 22%) 1fr minmax(80px, 28%);
   align-items: center;
   gap: 12px;
   pointer-events: none;
@@ -280,7 +280,7 @@ input:focus {
 
 .hud-item {
   justify-self: end;
-  font-size: clamp(18px, 6vh, 30px);
+  font-size: clamp(15px, 5vh, 26px);
   font-weight: 800;
   white-space: nowrap;
 }

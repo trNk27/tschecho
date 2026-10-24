@@ -11,13 +11,38 @@ A 1–4 player co-op survival game for game night. Phones are the controllers, o
 | | |
 | --- | --- |
 | **Day (2 min)** | Spread out and gather. Hold **A** to chop trees or mine rocks, tap **A** to pick berries or pick up piles. You carry one stack at a time. |
-| **B** | Next to the fire: throw your wood in. With berries: eat one. Otherwise: drop your stack (teammates can pick it up). |
-| **C** | 2 wood → torch (light radius, lasts until the next dawn). 3 stone → wall segment (blocks creatures until they break it). |
+| **B** | Next to the fire: throw your wood or gas in. With berries or canned food: eat one. Otherwise: drop your stack (teammates can pick it up). |
+| **C** | 2 wood → torch (light radius, lasts until the next dawn). 3 stone → wall segment (blocks creatures and zombies until they break it). |
 | **Dusk (20 s)** | Red sky and a warning: get back to the fire. |
-| **Night (90 s)** | Creatures come out of the dark. They will not enter the light of the fire or a torch (the glowing ring on the ground), but attack anyone outside it. Tap **A** to hit them. |
+| **Night (90 s)** | Shadow creatures come out of the dark. They will not enter the light of the fire or a torch (the glowing ring on the ground), but attack anyone outside it. A zombie horde also marches from the city to the camp; zombies are not afraid of light and stamp out the fire if they reach it. Tap **A** to fight. |
 | **Downed** | A teammate holds **A** next to you for 3 seconds to revive you. |
 
-The run is lost when the fire goes out or everyone is downed, and won at dawn of the last night (3 or 5 nights, chosen in the lobby; 5 nights take about 19 minutes). Creature count and fuel drain go up with every night and with more players. Each run gets a new island.
+The run is lost when the fire goes out or everyone is downed, and won at dawn of the last night (3 or 5 nights, chosen in the lobby; 5 nights take about 19 minutes). Each run gets a new island.
+
+### The abandoned city
+
+One side of every island holds a ruined city: 16 blocks of streets, wrecked cars, dumpsters, debris, collapsed buildings and zombies. Walk up to a car or dumpster and hold **A** to search it (each can be searched once a day; some refill at dawn). The city has three districts, shown on your phone and screen when you enter them:
+
+| District | Zombies | Typical loot |
+| --- | --- | --- |
+| **Outskirts** (the blocks facing the camp, houses and parks) | few | canned food, baseball bat, leather jacket, planks, some gas |
+| **Midtown** | more | gas cans, machete, ammo, the odd pistol |
+| **Downtown** (the four central blocks, tall towers) | swarming | gas cans, pistols, ammo, riot armour |
+
+Gear has its own slots (it does not take up your carried stack). Tap **A** on a loot bag to take it; your old item is dropped.
+
+| Gear | Effect |
+| --- | --- |
+| Fists | 1 damage |
+| Baseball bat 🏏 | 2 damage |
+| Machete 🔪 | 3 damage, faster swings |
+| Pistol 🔫 | 3 damage at up to 11 units, auto-aims; comes with 12 rounds, ammo boxes add 10. Gunshots attract zombies nearby. Out of ammo it is just a club. |
+| Leather jacket 🧥 | −30 % damage taken |
+| Riot armour 🦺 | −55 % damage taken |
+| Gas can ⛽ (carried) | +22 fuel each when poured on the fire |
+| Canned food 🥫 (carried) | +45 hunger |
+
+Difficulty rises every night: more and faster shadow creatures, a bigger zombie horde, tougher zombies, faster fuel drain, and the city refills with more zombies each dawn. All of it also scales with the number of players. Each player carries a small lantern at night, so dark streets stay readable (it does not scare anything away).
 
 ## Run it locally
 
@@ -62,9 +87,10 @@ On the free plan the service sleeps after 15 minutes without traffic and takes a
 Built for an average laptop:
 
 - Pixel ratio capped at 1 (0.75 on the **Low** graphics setting, which also turns off antialiasing). If the frame rate drops below about 50 fps (1–2 players) or 38 fps (3–4 players), the render resolution steps down automatically and back up when there is headroom.
-- Low-poly flat-shaded art without textures; trees, rocks, bushes, grass, creatures, torches, walls and dropped items are each one `InstancedMesh` draw call.
+- Low-poly flat-shaded art without textures; trees, rocks, bushes, grass, buildings, roofs, cars, dumpsters, debris, creatures, zombies (body, legs, eyes), torches, walls, loot and dropped items are each one `InstancedMesh` draw call. Building windows are drawn by the shader, not with geometry or textures. About 50 draw calls per viewport.
 - Fog with a 64-unit camera far plane, terrain split into chunks for frustum culling.
-- No real-time shadows (blob shadows instead); a fixed pool of 8 point lights (fire + 7 torches, re-assigned per viewport to the torches nearest that player) so shaders never recompile.
+- No real-time shadows (blob shadows instead); a fixed pool of 8 point lights (the fire, plus player lanterns at night and the nearest torches, re-assigned per viewport) so shaders never recompile.
+- Tall buildings and trees between the camera and a player are dithered away in the shader instead of moving the camera.
 - The simulation runs on a fixed 30 Hz tick, independent of rendering; positions are interpolated for smooth movement at any frame rate.
 
 ## Robustness and security
@@ -92,7 +118,7 @@ server/index.ts         HTTP static files, /healthz, WebSocket upgrade, ping
 server/rooms.ts         rooms, slots, reconnect tokens, routing, rate limits
 client/common/socket.ts reconnecting WebSocket
 client/host/            laptop page: lobby, QR code, HUD
-client/host/game/       island generation, simulation, Three.js renderer, models, audio
+client/host/game/       island + city generation, simulation (incl. zombies and gear), Three.js renderer, models, audio
 client/controller/      phone page: join form, joystick, buttons
 tests/                  node:test suites for the simulation and the room server
 ```

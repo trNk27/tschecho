@@ -31,7 +31,7 @@ export const PLAYER = {
   berryHp: 6,
 } as const;
 
-export const CARRY_MAX = { wood: 8, stone: 6, berry: 5 } as const;
+export const CARRY_MAX = { wood: 8, stone: 6, berry: 5, fuel: 2, can: 3 } as const;
 
 export const RESOURCES = {
   treeWood: 4,
@@ -72,3 +72,58 @@ export const CREATURE = {
 } as const;
 
 export const MAX_ITEMS_ON_GROUND = 40;
+
+// ---------------------------------------------------------------------------
+// Abandoned city, zombies and gear
+// ---------------------------------------------------------------------------
+
+export const CITY = {
+  blocks: 4, // 4 x 4 city blocks
+  blockCells: 9, // terrain cells per block incl. one road
+  roadCells: 3,
+  height: 1.3,
+  distance: 36, // city centre from the campfire
+} as const;
+
+/** 0 = outskirts, 1 = midtown, 2 = downtown. */
+export const DISTRICT_NAMES = ['Outskirts', 'Midtown', 'Downtown'] as const;
+
+export const ZOMBIE = {
+  radius: 0.42,
+  hp: 3,
+  hpPerNight: 0.5,
+  speedWander: 0.9,
+  speedChase: 2.1,
+  speedNight: 2.6,
+  speedPerNight: 0.12,
+  damage: 12,
+  attackCooldown: 1.2,
+  attackRange: 0.7,
+  aggroDay: 7.5,
+  aggroNight: 11,
+  max: 84, // total, so the nightly horde always has room
+  cityMax: 60,
+  /** Zombies per city block by district, before scaling with night and players. */
+  perBlock: [0.8, 2.2, 4.2],
+  trampleFuel: 1.6, // fuel per second each zombie stamps out of the fire
+} as const;
+
+export const SEARCH_TIME = 1.4;
+
+export type WeaponKind = 'bat' | 'machete' | 'pistol';
+export type ArmorKind = 'jacket' | 'armor';
+export type GearKind = WeaponKind | ArmorKind | 'ammo';
+
+export const WEAPONS: Record<WeaponKind | 'fists', { damage: number; cooldown: number; range: number }> = {
+  fists: { damage: 1, cooldown: 0.42, range: 2.0 },
+  bat: { damage: 2, cooldown: 0.45, range: 2.2 },
+  machete: { damage: 3, cooldown: 0.38, range: 2.2 },
+  pistol: { damage: 3, cooldown: 0.35, range: 11 },
+};
+
+export const ARMOR: Record<ArmorKind, number> = { jacket: 0.3, armor: 0.55 };
+export const PISTOL_AMMO = 12;
+export const AMMO_PICKUP = 10;
+export const GAS_FUEL = 22;
+export const CAN_FOOD = 45;
+export const MAX_GEAR_ON_GROUND = 30;

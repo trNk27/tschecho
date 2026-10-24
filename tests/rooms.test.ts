@@ -127,7 +127,7 @@ test('only the host may send host messages; phones cannot target other slots', (
   // The host can.
   h.send({ t: 'haptic', slot: 2, pattern: 'hit' });
   assert.equal(b.last('haptic')!.pattern, 'hit');
-  h.send({ t: 'hud', slot: 1, hp: 50, food: 20, item: null, hint: 'Hold A: chop', a: 'Chop', b: '', c: '', downed: false, progress: 0 });
+  h.send({ t: 'hud', slot: 1, hp: 50, food: 20, item: null, hint: 'Hold A: chop', gear: '', a: 'Chop', b: '', c: '', downed: false, progress: 0 });
   assert.equal(a.last('hud')!.hint, 'Hold A: chop');
   assert.equal(b.last('hud'), undefined);
 });

@@ -2,7 +2,8 @@
 
 import * as THREE from 'three';
 import type { ItemType } from '../../../shared/constants';
-import { berryPileGeometry, colored, logGeometry, merge, stonePileGeometry } from './models';
+import type { ArmorKind, WeaponKind } from './config';
+import { berryPileGeometry, foodCanGeometry, gasCanGeometry, logGeometry, stonePileGeometry, weaponGeometry } from './models';
 
 const shared = {
   skin: new THREE.MeshLambertMaterial({ color: '#f0c08a', flatShading: true }),
@@ -18,13 +19,22 @@ const shared = {
     eye: new THREE.BoxGeometry(0.06, 0.08, 0.03),
     leg: new THREE.BoxGeometry(0.15, 0.36, 0.16).translate(0, -0.18, 0),
     arm: new THREE.BoxGeometry(0.12, 0.38, 0.12).translate(0, -0.17, 0),
-    tool: merge([
-      colored(new THREE.BoxGeometry(0.05, 0.55, 0.05).translate(0, -0.3, 0), '#7a5232'),
-      colored(new THREE.BoxGeometry(0.05, 0.14, 0.22).translate(0, -0.52, 0.1), '#b8bcc4'),
-    ]),
+    weapons: {
+      axe: weaponGeometry('axe'),
+      bat: weaponGeometry('bat'),
+      machete: weaponGeometry('machete'),
+      pistol: weaponGeometry('pistol'),
+    },
+    vest: new THREE.CapsuleGeometry(0.33, 0.3, 2, 7),
     log: logGeometry().scale(0.6, 0.6, 0.6),
     stones: stonePileGeometry().scale(0.85, 0.85, 0.85),
     berries: berryPileGeometry(),
+    gas: gasCanGeometry(),
+    cans: foodCanGeometry().scale(1.3, 1.3, 1.3),
+  },
+  vestMat: {
+    jacket: new THREE.MeshLambertMaterial({ color: '#6b4226', flatShading: true }),
+    armor: new THREE.MeshLambertMaterial({ color: '#39424e', flatShading: true }),
   },
 };
 
@@ -36,7 +46,8 @@ export class PlayerModel {
   private legR: THREE.Mesh;
   private armL: THREE.Object3D;
   private armR: THREE.Object3D;
-  private tool: THREE.Mesh;
+  private tools: Record<'axe' | WeaponKind, THREE.Mesh>;
+  private vest: THREE.Mesh;
   private items: Record<ItemType, THREE.Mesh[]>;
   private walk = 0;
   private downAmount = 0;
@@ -78,12 +89,20 @@ export class PlayerModel {
     this.armL.position.set(0.37, 0.98, 0);
     this.armR = new THREE.Mesh(shared.geo.arm, armMat);
     this.armR.position.set(-0.37, 0.98, 0);
-    this.tool = new THREE.Mesh(shared.geo.tool, shared.tool);
-    this.tool.position.set(0, -0.3, 0.04);
-    this.tool.rotation.x = Math.PI / 2;
-    this.tool.visible = false;
-    this.armR.add(this.tool);
-    this.body.add(this.armL, this.armR);
+    const tool = (geo: THREE.BufferGeometry) => {
+      const m = new THREE.Mesh(geo, shared.tool);
+      m.position.set(0, -0.3, 0.04);
+      m.rotation.x = Math.PI / 2;
+      m.visible = false;
+      this.armR.add(m);
+      return m;
+    };
+    const w = shared.geo.weapons;
+    this.tools = { axe: tool(w.axe), bat: tool(w.bat), machete: tool(w.machete), pistol: tool(w.pistol) };
+    this.vest = new THREE.Mesh(shared.geo.vest, shared.vestMat.jacket);
+    this.vest.position.y = 0.76;
+    this.vest.visible = false;
+    this.body.add(this.armL, this.armR, this.vest);
 
     const mk = (geo: THREE.BufferGeometry, n: number, dy: number) =>
       Array.from({ length: n }, (_, i) => {
@@ -98,6 +117,8 @@ export class PlayerModel {
       wood: mk(shared.geo.log, 3, 0.2),
       stone: mk(shared.geo.stones, 2, 0.28),
       berry: mk(shared.geo.berries, 2, 0.2),
+      fuel: mk(shared.geo.gas, 2, 0.5),
+      can: mk(shared.geo.cans, 2, 0.25),
     };
   }
 
@@ -116,6 +137,8 @@ export class PlayerModel {
     hurtT: number;
     time: number;
     dt: number;
+    weapon: WeaponKind | '';
+    armor: ArmorKind | '';
   }): void {
     const { root, body } = this;
     root.position.set(opts.x, opts.y, opts.z);
@@ -143,7 +166,11 @@ export class PlayerModel {
     let armR = carrying ? -1.2 : -s * 0.8;
     let armL = carrying ? -1.2 : s * 0.8;
     const acting = opts.action === 'chop' || opts.action === 'mine';
-    this.tool.visible = acting || opts.swingT < 0.35;
+    const swinging = opts.swingT < 0.35;
+    const shown: 'axe' | WeaponKind | '' = acting ? 'axe' : opts.weapon || (swinging ? 'axe' : '');
+    for (const [k, m] of Object.entries(this.tools)) m.visible = k === shown && !(carrying && !acting && !swinging);
+    this.vest.visible = !!opts.armor;
+    if (opts.armor) this.vest.material = shared.vestMat[opts.armor];
     if (acting) {
       const period = opts.action === 'chop' ? 0.85 : 1.15;
       const ph = (opts.actionTime % period) / period;
@@ -151,15 +178,19 @@ export class PlayerModel {
       armL = -0.5;
     } else if (opts.action === 'revive') {
       armR = armL = -1.3 + Math.sin(opts.time * 10) * 0.1;
-    } else if (opts.swingT < 0.35) {
+    } else if (swinging && opts.weapon === 'pistol') {
+      armR = -1.5 + Math.max(0, 0.15 - opts.swingT) * 3; // aim and recoil
+    } else if (swinging) {
       const t = opts.swingT / 0.35;
       armR = t < 0.3 ? -2.8 * (t / 0.3) : -2.8 + (t - 0.3) * 4.6;
+    } else if (opts.weapon && !carrying) {
+      armR = -0.5 - s * 0.3;
     }
     this.armR.rotation.x = armR;
     this.armL.rotation.x = armL;
 
     // Held items.
-    for (const type of ['wood', 'stone', 'berry'] as ItemType[]) {
+    for (const type of ['wood', 'stone', 'berry', 'fuel', 'can'] as ItemType[]) {
       const meshes = this.items[type];
       const n = opts.item?.type === type ? Math.min(meshes.length, Math.ceil(opts.item.count / (type === 'wood' ? 3 : 3))) : 0;
       meshes.forEach((m, i) => (m.visible = i < Math.max(n, opts.item?.type === type ? 1 : 0)));

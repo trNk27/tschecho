@@ -17,7 +17,7 @@ interface Session {
   name: string;
 }
 
-const ITEM_ICON: Record<string, string> = { wood: '🪵', stone: '🪨', berry: '🫐' };
+const ITEM_ICON: Record<string, string> = { wood: '🪵', stone: '🪨', berry: '🫐', fuel: '⛽', can: '🥫' };
 
 const isIOS =
   /iPad|iPhone|iPod/.test(navigator.userAgent) ||
@@ -387,7 +387,8 @@ function renderHud(h: HudPayload): void {
   $('hud-hp').style.transform = `scaleX(${h.hp / 100})`;
   $('hud-food').style.transform = `scaleX(${h.food / 100})`;
   $('hud-hint').textContent = h.hint;
-  $('hud-item').textContent = h.item ? `${ITEM_ICON[h.item.type] ?? ''} ×${h.item.count}` : '';
+  const item = h.item ? `${ITEM_ICON[h.item.type] ?? ''} ×${h.item.count}` : '';
+  $('hud-item').textContent = [h.gear, item].filter(Boolean).join('  ');
   setLabel('btn-a', h.a);
   setLabel('btn-b', h.b);
   setLabel('btn-c', h.c);

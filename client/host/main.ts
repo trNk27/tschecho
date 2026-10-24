@@ -285,6 +285,8 @@ function startGame(): void {
     sim.setConnected(p.slot, p.connected);
     p.ready = false;
   }
+  // Zombie numbers scale with the number of players.
+  sim.populateCity(1);
   mode = 'playing';
   acc = 0;
   lastHud.clear();
@@ -330,7 +332,7 @@ function saveSnapshot(): void {
 
 function tryRestoreSnapshot(): boolean {
   const snap = load<{ room: string; savedAt: number; state: SimState }>(sessionStorage, SNAP_KEY);
-  if (!snap || snap.room !== room || Date.now() - snap.savedAt > 90_000 || snap.state?.version !== 1) return false;
+  if (!snap || snap.room !== room || Date.now() - snap.savedAt > 90_000 || snap.state?.version !== 2) return false;
   try {
     world = new World(snap.state.seed);
     renderer.setWorld(world);
@@ -368,6 +370,13 @@ const SFX: Partial<Record<SimEvent['type'], Sfx>> = {
   creatureDie: 'creatureDie',
   wallHit: 'wall',
   wallBreak: 'wall',
+  shot: 'shot',
+  search: 'search',
+  gear: 'gear',
+  zombieHit: 'creatureHit',
+  zombieDie: 'zombieDie',
+  zombieAttack: 'zombie',
+  trample: 'trample',
 };
 
 function handleEvents(): void {
@@ -422,6 +431,35 @@ function handleEvents(): void {
       case 'wallHit':
       case 'wallBreak':
         renderer.fx('wall', e.x, e.z);
+        break;
+      case 'shot':
+        renderer.fx('shot', e.x, e.z, e.tx, e.tz);
+        break;
+      case 'search':
+        renderer.fx('search', e.x, e.z);
+        haptic(e.slot, 'pickup');
+        break;
+      case 'gear': {
+        haptic(e.slot, 'pickup');
+        break;
+      }
+      case 'zombieHit':
+        renderer.fx('zhit', e.x, e.z);
+        break;
+      case 'zombieDie':
+        renderer.fx('zdie', e.x, e.z);
+        break;
+      case 'trample':
+        renderer.fx('trample', e.x, e.z);
+        hud.banner('🧟 Zombies at the fire!', 'Drive them away before it goes out', 1800);
+        break;
+      case 'horde':
+        hud.banner('🧟 A horde is coming from the city!', 'Build walls and defend the fire', 3500);
+        audio.play('horde');
+        for (const p of sim.state.players) haptic(p.slot, 'alert');
+        break;
+      case 'area':
+        if (e.area === 2) haptic(e.slot, 'alert');
         break;
       case 'phase':
         if (e.phase === 'dusk') {
@@ -518,7 +556,9 @@ function renderOver(): void {
   const stats: [string, string][] = [
     [`${survived} / ${s.nights}`, 'nights survived'],
     [String(s.stats.woodBurned), 'wood burned'],
-    [String(s.stats.kills), 'creatures defeated'],
+    [String(s.stats.zombies), 'zombies killed'],
+    [String(s.stats.kills - s.stats.zombies), 'creatures defeated'],
+    [String(s.stats.searched), 'cars & crates searched'],
     [String(s.stats.revives), 'revives'],
     [fmtTime(s.time), 'time'],
   ];

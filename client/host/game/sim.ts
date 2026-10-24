@@ -3,17 +3,32 @@
 
 import { BTN_A, BTN_B, BTN_C, type ItemType } from '../../../shared/constants';
 import type { HudPayload } from '../../../shared/protocol';
+import { CAR_LENGTH, CAR_WIDTH } from './city';
+import { CITY } from './config';
 import {
+  AMMO_PICKUP,
+  ARMOR,
+  CAN_FOOD,
   CARRY_MAX,
   CREATURE,
+  DISTRICT_NAMES,
   DT,
   FIRE,
+  GAS_FUEL,
+  MAX_GEAR_ON_GROUND,
   MAX_ITEMS_ON_GROUND,
   PHASE_TIME,
+  PISTOL_AMMO,
   PLAYER,
   RESOURCES,
+  SEARCH_TIME,
   TORCH,
   WALL,
+  WEAPONS,
+  ZOMBIE,
+  type ArmorKind,
+  type GearKind,
+  type WeaponKind,
 } from './config';
 import { clamp } from './rng';
 import type { World } from './world';
@@ -41,7 +56,7 @@ export interface PlayerState {
   downed: boolean;
   item: Held | null;
   actionTime: number;
-  actionKind: '' | 'chop' | 'mine' | 'revive';
+  actionKind: '' | 'chop' | 'mine' | 'revive' | 'search';
   attackCd: number;
   swingT: number; // seconds since last swing
   hurtT: number;
@@ -49,6 +64,42 @@ export interface PlayerState {
   connected: boolean;
   kills: number;
   woodBurned: number;
+  weapon: WeaponKind | '';
+  ammo: number;
+  armor: ArmorKind | '';
+  area: number; // -1 wilds, 0..2 city district
+  areaT: number; // seconds since entering the area
+}
+
+export interface ZombieState {
+  id: number;
+  x: number;
+  z: number;
+  px: number;
+  pz: number;
+  fx: number;
+  fz: number;
+  hp: number;
+  cd: number;
+  block: number; // home city block
+  horde: boolean; // marching on the camp
+  wx: number; // wander target
+  wz: number;
+  wanderT: number;
+  alertT: number; // heard a gunshot
+  detourT: number;
+  detour: number;
+  hurtT: number;
+  attackT: number;
+  age: number;
+  shade: number;
+}
+
+export interface GearDrop {
+  id: number;
+  kind: GearKind;
+  x: number;
+  z: number;
 }
 
 export interface CreatureState {
@@ -95,7 +146,7 @@ export interface WallState {
 }
 
 export interface SimState {
-  version: 1;
+  version: 2;
   seed: number;
   nights: number;
   night: number;
@@ -108,6 +159,12 @@ export interface SimState {
   items: ItemState[];
   torches: TorchState[];
   walls: WallState[];
+  zombies: ZombieState[];
+  gear: GearDrop[];
+  containers: number[]; // 1 = can be searched, 0 = already searched today
+  hordeLeft: number;
+  hordeTimer: number;
+  hordeWarned: boolean;
   trees: number[]; // wood left, 0 = stump
   rocks: number[]; // stone left, 0 = gone
   bushes: number[]; // berries left
@@ -116,7 +173,7 @@ export interface SimState {
   nextId: number;
   rng: number;
   over: null | { won: boolean; reason: string };
-  stats: { woodBurned: number; kills: number; revives: number; torches: number; walls: number };
+  stats: { woodBurned: number; kills: number; zombies: number; revives: number; torches: number; walls: number; searched: number };
 }
 
 export type SimEvent =
@@ -124,6 +181,11 @@ export type SimEvent =
   | { type: 'hurt' | 'downed' | 'revived' | 'fail'; slot: number; x: number; z: number }
   | { type: 'creatureHit' | 'creatureDie' | 'creatureAttack' | 'creatureBurn' | 'spawn'; x: number; z: number }
   | { type: 'wallHit' | 'wallBreak'; x: number; z: number }
+  | { type: 'shot'; slot: number; x: number; z: number; tx: number; tz: number }
+  | { type: 'search' | 'gear'; slot: number; x: number; z: number }
+  | { type: 'zombieHit' | 'zombieDie' | 'zombieAttack' | 'trample'; x: number; z: number }
+  | { type: 'horde' }
+  | { type: 'area'; slot: number; area: number }
   | { type: 'phase'; phase: Phase | 'dawn'; night: number }
   | { type: 'over'; won: boolean };
 
@@ -137,13 +199,48 @@ interface InputState {
 
 type Target =
   | { kind: 'revive'; slot: number; dist: number }
-  | { kind: 'attack'; id: number; dist: number }
+  | { kind: 'attack'; id: number; dist: number; zombie: boolean }
   | { kind: 'item'; id: number; dist: number; blocked: boolean }
+  | { kind: 'gear'; id: number; dist: number }
+  | { kind: 'container'; i: number; dist: number }
   | { kind: 'bush'; i: number; dist: number; blocked: boolean }
   | { kind: 'tree'; i: number; dist: number; blocked: boolean }
   | { kind: 'rock'; i: number; dist: number; blocked: boolean };
 
-const ITEM_NAME: Record<ItemType, string> = { wood: 'wood', stone: 'stone', berry: 'berries' };
+const ITEM_NAME: Record<ItemType, string> = {
+  wood: 'wood',
+  stone: 'stone',
+  berry: 'berries',
+  fuel: 'gas can',
+  can: 'canned food',
+};
+
+export const GEAR_NAME: Record<GearKind, string> = {
+  bat: 'baseball bat',
+  machete: 'machete',
+  pistol: 'pistol',
+  jacket: 'leather jacket',
+  armor: 'riot armour',
+  ammo: 'ammo',
+};
+
+export const GEAR_ICON: Record<GearKind, string> = {
+  bat: '🏏',
+  machete: '🔪',
+  pistol: '🔫',
+  jacket: '🧥',
+  armor: '🦺',
+  ammo: '•',
+};
+
+type Loot = GearKind | 'fuel' | 'can' | 'wood';
+
+/** Loot tables per district: [what, weight]. Better gear deeper in the city. */
+const LOOT: Record<0 | 1 | 2, [Loot, number][]> = {
+  0: [['can', 35], ['bat', 18], ['jacket', 12], ['wood', 20], ['fuel', 15]],
+  1: [['can', 20], ['fuel', 25], ['machete', 16], ['ammo', 12], ['jacket', 10], ['bat', 10], ['pistol', 7]],
+  2: [['fuel', 24], ['pistol', 18], ['ammo', 22], ['armor', 16], ['machete', 10], ['can', 10]],
+};
 
 export class Sim {
   readonly events: SimEvent[] = [];
@@ -156,8 +253,8 @@ export class Sim {
   ) {}
 
   static newState(world: World, nights: number): SimState {
-    return {
-      version: 1,
+    const state: SimState = {
+      version: 2,
       seed: world.seed,
       nights,
       night: 1,
@@ -170,6 +267,12 @@ export class Sim {
       items: [],
       torches: [],
       walls: [],
+      zombies: [],
+      gear: [],
+      containers: world.city.containers.map(() => 1),
+      hordeLeft: 0,
+      hordeTimer: 0,
+      hordeWarned: false,
       trees: world.trees.map(() => RESOURCES.treeWood),
       rocks: world.rocks.map(() => RESOURCES.rockStone),
       bushes: world.bushes.map(() => RESOURCES.bushBerries),
@@ -178,8 +281,10 @@ export class Sim {
       nextId: 1,
       rng: (world.seed * 2654435761) >>> 0,
       over: null,
-      stats: { woodBurned: 0, kills: 0, revives: 0, torches: 0, walls: 0 },
+      stats: { woodBurned: 0, kills: 0, zombies: 0, revives: 0, torches: 0, walls: 0, searched: 0 },
     };
+    new Sim(world, state).populateCity(1);
+    return state;
   }
 
   // -------------------------------------------------------------------------
@@ -225,6 +330,11 @@ export class Sim {
       connected: true,
       kills: 0,
       woodBurned: 0,
+      weapon: '',
+      ammo: 0,
+      armor: '',
+      area: -1,
+      areaT: 9,
     });
     this.state.players.sort((a, b) => a.slot - b.slot);
   }
@@ -376,9 +486,43 @@ export class Sim {
       if (type === 0) {
         const t = w.trees[i];
         pushCircle(t.x, t.z, s.trees[i] > 0 ? t.r : t.r * 0.8);
-      } else if (s.rocks[i] > 0) {
+      } else if (type === 1) {
+        if (s.rocks[i] <= 0) continue;
         const r = w.rocks[i];
         pushCircle(r.x, r.z, r.r * (0.55 + 0.15 * s.rocks[i]));
+      } else if (type === 2) {
+        // Building: push out of the rectangle.
+        const b = w.city.buildings[i];
+        const qx = clamp(pos.x, b.x0, b.x1);
+        const qz = clamp(pos.z, b.z0, b.z1);
+        const ddx = pos.x - qx;
+        const ddz = pos.z - qz;
+        const d2 = ddx * ddx + ddz * ddz;
+        if (d2 < radius * radius) {
+          if (d2 > 1e-8) {
+            const d = Math.sqrt(d2);
+            pos.x = qx + (ddx / d) * radius;
+            pos.z = qz + (ddz / d) * radius;
+          } else {
+            // Centre inside: leave by the nearest side.
+            const out = [pos.x - b.x0, b.x1 - pos.x, pos.z - b.z0, b.z1 - pos.z];
+            const m = out.indexOf(Math.min(...out));
+            if (m === 0) pos.x = b.x0 - radius;
+            else if (m === 1) pos.x = b.x1 + radius;
+            else if (m === 2) pos.z = b.z0 - radius;
+            else pos.z = b.z1 + radius;
+          }
+        }
+      } else if (type === 3) {
+        const c = w.city.cars[i];
+        const ax = Math.cos(c.rot);
+        const az = -Math.sin(c.rot);
+        const off = (CAR_LENGTH - CAR_WIDTH) / 2;
+        pushCircle(c.x + ax * off, c.z + az * off, CAR_WIDTH / 2);
+        pushCircle(c.x - ax * off, c.z - az * off, CAR_WIDTH / 2);
+      } else if (type === 4) {
+        const c = w.city.crates[i];
+        pushCircle(c.x, c.z, 0.65);
       }
     }
     pushCircle(0, 0, FIRE.ringRadius);
@@ -438,11 +582,22 @@ export class Sim {
       c.px = c.x;
       c.pz = c.z;
     }
+    for (const z of s.zombies) {
+      z.px = z.x;
+      z.pz = z.z;
+    }
 
     for (const p of s.players) this.stepPlayer(p);
     this.separatePlayers();
     this.stepSpawning();
     this.stepCreatures();
+    this.stepHorde();
+    this.stepZombies();
+    if (s.fuel <= 0) {
+      s.fuel = 0;
+      this.end(false, `Zombies stamped out the fire on ${s.phase === 'day' ? 'day' : 'night'} ${s.night}.`);
+      return;
+    }
     for (const t of s.torches) t.age += DT;
 
     for (const inp of this.inputs.values()) {
@@ -474,6 +629,10 @@ export class Sim {
       const players = Math.max(1, s.players.length);
       s.spawnLeft = Math.round((2 + 1.6 * s.night) * (0.55 + 0.45 * players));
       s.spawnTimer = 0;
+      // A zombie horde leaves the city and marches on the camp; bigger every night.
+      s.hordeLeft = Math.round((1 + 1.4 * s.night) * (0.6 + 0.4 * players));
+      s.hordeTimer = 6;
+      s.hordeWarned = false;
       this.events.push({ type: 'phase', phase: 'night', night: s.night });
     } else if (s.phase === 'night' && s.phaseTime >= PHASE_TIME.night) {
       this.dawn();
@@ -489,6 +648,10 @@ export class Sim {
     s.trees = s.trees.map((w) => (w > 0 ? RESOURCES.treeWood : this.random() < RESOURCES.treeRegrowChance ? RESOURCES.treeWood : 0));
     s.rocks = s.rocks.map((r) => (r > 0 ? r : this.random() < RESOURCES.rockRespawnChance ? RESOURCES.rockStone : 0));
     s.bushes = s.bushes.map(() => RESOURCES.bushBerries);
+    // Survivors of the horde wander back; cars and crates partly refill.
+    s.hordeLeft = 0;
+    for (const z of s.zombies) z.horde = false;
+    s.containers = s.containers.map((c) => (c > 0 ? c : this.random() < 0.45 ? 1 : 0));
     if (s.night >= s.nights) {
       this.events.push({ type: 'phase', phase: 'dawn', night: s.night });
       this.end(true, `You kept the fire alive for ${s.nights} nights.`);
@@ -497,6 +660,8 @@ export class Sim {
     s.night++;
     s.phase = 'day';
     s.phaseTime = 0;
+    // The city fills up again, with more zombies every day.
+    this.populateCity(s.night);
     this.events.push({ type: 'phase', phase: 'dawn', night: s.night });
   }
 
@@ -510,7 +675,14 @@ export class Sim {
     const held = p.connected ? inp.b : 0;
     p.swingT += DT;
     p.hurtT += DT;
+    p.areaT += DT;
     p.attackCd = Math.max(0, p.attackCd - DT);
+    const area = this.world.districtAt(p.x, p.z);
+    if (area !== p.area) {
+      p.area = area;
+      p.areaT = 0;
+      this.events.push({ type: 'area', slot: p.slot, area });
+    }
 
     if (p.downed) {
       p.speed = 0;
@@ -562,7 +734,9 @@ export class Sim {
             ? 'mine'
             : target.kind === 'revive'
               ? 'revive'
-              : ''
+              : target.kind === 'container'
+                ? 'search'
+                : ''
         : '';
     if (holdKind && held & BTN_A && target) {
       if (p.actionKind !== holdKind) p.actionTime = 0;
@@ -578,9 +752,10 @@ export class Sim {
     // A: tap actions.
     if (pressed & BTN_A && !holdKind) {
       if (target?.kind === 'item' && !target.blocked) this.pickupItem(p, target.id);
+      else if (target?.kind === 'gear') this.pickupGear(p, target.id);
       else if (target?.kind === 'bush' && !target.blocked) this.pickBerry(p, target.i);
       else if (target && 'blocked' in target && target.blocked) this.events.push({ type: 'fail', slot: p.slot, x: p.x, z: p.z });
-      else this.attack(p, target?.kind === 'attack' ? target.id : -1);
+      else this.attack(p, target?.kind === 'attack' ? target : null);
     }
 
     if (pressed & BTN_B) this.use(p);
@@ -605,9 +780,13 @@ export class Sim {
       case 'revive':
         return this.player(t.slot) ?? null;
       case 'attack':
-        return s.creatures.find((c) => c.id === t.id) ?? null;
+        return (t.zombie ? s.zombies.find((z) => z.id === t.id) : s.creatures.find((c) => c.id === t.id)) ?? null;
       case 'item':
         return s.items.find((i) => i.id === t.id) ?? null;
+      case 'gear':
+        return s.gear.find((g) => g.id === t.id) ?? null;
+      case 'container':
+        return this.world.city.containers[t.i];
       case 'bush':
         return this.world.bushes[t.i];
       case 'tree':
@@ -639,7 +818,11 @@ export class Sim {
     for (const c of s.creatures) {
       if (c.flee) continue;
       const d = Math.hypot(c.x - p.x, c.z - p.z) - CREATURE.radius;
-      if (d < PLAYER.attackRange && (!best || d < best.dist)) best = { kind: 'attack', id: c.id, dist: d };
+      if (d < PLAYER.attackRange && (!best || d < best.dist)) best = { kind: 'attack', id: c.id, dist: d, zombie: false };
+    }
+    for (const z of s.zombies) {
+      const d = Math.hypot(z.x - p.x, z.z - p.z) - ZOMBIE.radius;
+      if (d < PLAYER.attackRange && (!best || d < best.dist)) best = { kind: 'attack', id: z.id, dist: d, zombie: true };
     }
     if (best) return best;
 
@@ -648,6 +831,10 @@ export class Sim {
       if (d < PLAYER.reach && (!best || d < best.dist)) {
         best = { kind: 'item', id: it.id, dist: d, blocked: !this.canCarry(p, it.type) };
       }
+    }
+    for (const g of s.gear) {
+      const d = Math.hypot(g.x - p.x, g.z - p.z);
+      if (d < PLAYER.reach && (!best || d < best.dist)) best = { kind: 'gear', id: g.id, dist: d };
     }
     if (best) return best;
 
@@ -669,12 +856,21 @@ export class Sim {
         if (d < PLAYER.reach * 0.75 && (!bestGather || d < (bestGather as Target).dist)) {
           bestGather = { kind: 'tree', i, dist: d, blocked: !this.canCarry(p, 'wood') };
         }
-      } else {
+      } else if (type === 1) {
         if (s.rocks[i] <= 0) continue;
         const r = w.rocks[i];
         const d = distTo(r.x, r.z) - r.r;
         if (d < PLAYER.reach * 0.75 && (!bestGather || d < (bestGather as Target).dist)) {
           bestGather = { kind: 'rock', i, dist: d, blocked: !this.canCarry(p, 'stone') };
+        }
+      } else if (type === 3 || type === 4) {
+        // Cars and crates; containers list cars first, then crates.
+        const ci = type === 3 ? i : w.city.cars.length + i;
+        if (!s.containers[ci]) continue;
+        const c = w.city.containers[ci];
+        const d = distTo(c.x, c.z) - (type === 3 ? 1.2 : 0.7);
+        if (d < PLAYER.reach * 0.75 && (!bestGather || d < (bestGather as Target).dist)) {
+          bestGather = { kind: 'container', i: ci, dist: d };
         }
       }
     }
@@ -706,6 +902,13 @@ export class Sim {
       this.events.push({ type: 'mine', slot: p.slot, x: rock.x, z: rock.z });
       this.events.push({ type: 'pickup', slot: p.slot, x: p.x, z: p.z });
       if (s.rocks[t.i] <= 0) this.events.push({ type: 'rockBreak', slot: p.slot, x: rock.x, z: rock.z });
+    } else if (t.kind === 'container') {
+      if (p.actionTime < SEARCH_TIME) return;
+      p.actionTime = 0;
+      if (!s.containers[t.i]) return;
+      s.containers[t.i] = 0;
+      s.stats.searched++;
+      this.loot(p, t.i);
     } else if (t.kind === 'revive') {
       const q = this.player(t.slot);
       if (!q || !q.downed) return;
@@ -742,34 +945,128 @@ export class Sim {
     this.events.push({ type: 'pickup', slot: p.slot, x: b.x, z: b.z });
   }
 
-  private attack(p: PlayerState, targetId: number): void {
+  private attack(p: PlayerState, target: Extract<Target, { kind: 'attack' }> | null): void {
     if (p.attackCd > 0) return;
-    p.attackCd = PLAYER.attackCooldown;
-    p.swingT = 0;
     const s = this.state;
-    if (targetId >= 0) {
-      const c = s.creatures.find((q) => q.id === targetId);
-      if (c) this.faceTowards(p, { kind: 'attack', id: c.id, dist: 0 });
+    const gun = p.weapon === 'pistol' && p.ammo > 0;
+    const weapon = WEAPONS[p.weapon && (p.weapon !== 'pistol' || gun) ? p.weapon : 'fists'];
+    p.attackCd = weapon.cooldown;
+    p.swingT = 0;
+
+    if (gun) {
+      // Auto-aim at the nearest enemy roughly in front, else the nearest one in range.
+      let best: { e: ZombieState | CreatureState; zombie: boolean; score: number } | null = null;
+      const consider = (e: ZombieState | CreatureState, zombie: boolean) => {
+        const dx = e.x - p.x;
+        const dz = e.z - p.z;
+        const d = Math.hypot(dx, dz);
+        if (d > weapon.range) return;
+        const facing = d > 0.01 ? (dx * p.fx + dz * p.fz) / d : 1;
+        const score = d - facing * 4;
+        if (!best || score < best.score) best = { e, zombie, score };
+      };
+      for (const z of s.zombies) consider(z, true);
+      for (const c of s.creatures) if (!c.flee) consider(c, false);
+      p.ammo--;
+      const hit = best as { e: ZombieState | CreatureState; zombie: boolean } | null;
+      if (hit) {
+        this.faceTowards(p, { kind: 'attack', id: hit.e.id, dist: 0, zombie: hit.zombie });
+        this.damageEnemy(p, hit.e, hit.zombie, weapon.damage, 0.5);
+      }
+      const tx = hit ? hit.e.x : p.x + p.fx * weapon.range;
+      const tz = hit ? hit.e.z : p.z + p.fz * weapon.range;
+      this.events.push({ type: 'shot', slot: p.slot, x: p.x, z: p.z, tx, tz });
+      // Gunshots carry: nearby zombies come running.
+      for (const z of s.zombies) if (Math.hypot(z.x - p.x, z.z - p.z) < 16) z.alertT = 6;
+      this.removeDead();
+      return;
     }
+
+    if (target) this.faceTowards(p, target);
     this.events.push({ type: 'swing', slot: p.slot, x: p.x, z: p.z });
-    for (const c of s.creatures) {
-      if (c.flee) continue;
-      const dx = c.x - p.x;
-      const dz = c.z - p.z;
+    const inFront = (e: { x: number; z: number }, r: number) => {
+      const dx = e.x - p.x;
+      const dz = e.z - p.z;
       const d = Math.hypot(dx, dz);
-      if (d - CREATURE.radius > PLAYER.attackRange) continue;
-      if (d > 0.3 && (dx * p.fx + dz * p.fz) / d < 0.2) continue; // must be in front
-      c.hp -= PLAYER.attackDamage;
-      c.hurtT = 0;
-      const kd = d || 1;
-      this.move(c, (dx / kd) * 1.1, (dz / kd) * 1.1, CREATURE.radius);
-      this.events.push({ type: 'creatureHit', x: c.x, z: c.z });
-      if (c.hp <= 0) {
-        p.kills++;
-        s.stats.kills++;
+      if (d - r > weapon.range) return false;
+      return d < 0.3 || (dx * p.fx + dz * p.fz) / d >= 0.2;
+    };
+    for (const c of s.creatures) if (!c.flee && inFront(c, CREATURE.radius)) this.damageEnemy(p, c, false, weapon.damage, 1.1);
+    for (const z of s.zombies) if (inFront(z, ZOMBIE.radius)) this.damageEnemy(p, z, true, weapon.damage, 0.9);
+    this.removeDead();
+  }
+
+  private damageEnemy(p: PlayerState, e: ZombieState | CreatureState, zombie: boolean, damage: number, knock: number): void {
+    const s = this.state;
+    e.hp -= damage;
+    e.hurtT = 0;
+    const dx = e.x - p.x;
+    const dz = e.z - p.z;
+    const d = Math.hypot(dx, dz) || 1;
+    this.move(e, (dx / d) * knock, (dz / d) * knock, zombie ? ZOMBIE.radius : CREATURE.radius);
+    this.events.push({ type: zombie ? 'zombieHit' : 'creatureHit', x: e.x, z: e.z });
+    if (e.hp <= 0) {
+      p.kills++;
+      s.stats.kills++;
+      if (zombie) s.stats.zombies++;
+    }
+  }
+
+  private removeDead(): void {
+    this.removeDeadCreatures();
+    const s = this.state;
+    for (const z of s.zombies) if (z.hp <= 0) this.events.push({ type: 'zombieDie', x: z.x, z: z.z });
+    s.zombies = s.zombies.filter((z) => z.hp > 0);
+  }
+
+  private pickupGear(p: PlayerState, id: number): void {
+    const s = this.state;
+    const g = s.gear.find((q) => q.id === id);
+    if (!g) return;
+    s.gear = s.gear.filter((q) => q !== g);
+    if (g.kind === 'ammo') {
+      p.ammo = Math.min(99, p.ammo + AMMO_PICKUP);
+    } else if (g.kind === 'jacket' || g.kind === 'armor') {
+      if (p.armor) this.dropGear(p.x, p.z, p.armor);
+      p.armor = g.kind;
+    } else {
+      if (p.weapon) this.dropGear(p.x, p.z, p.weapon);
+      p.weapon = g.kind;
+      if (g.kind === 'pistol') p.ammo = Math.min(99, p.ammo + PISTOL_AMMO);
+    }
+    this.events.push({ type: 'gear', slot: p.slot, x: g.x, z: g.z });
+  }
+
+  private dropGear(x: number, z: number, kind: GearKind): void {
+    const s = this.state;
+    if (s.gear.length >= MAX_GEAR_ON_GROUND) s.gear.shift();
+    const a = this.random() * Math.PI * 2;
+    s.gear.push({ id: s.nextId++, kind, x: x + Math.cos(a) * 0.6, z: z + Math.sin(a) * 0.6 });
+  }
+
+  /** Roll the loot table of a searched car or crate and drop it next to the player. */
+  private loot(p: PlayerState, ci: number): void {
+    const c = this.world.city.containers[ci];
+    const table = LOOT[c.tier];
+    const weighted = c.kind === 'car' ? table.map(([k, w]) => [k, k === 'fuel' ? w * 2 : w] as [Loot, number]) : table;
+    const total = weighted.reduce((sum, [, w]) => sum + w, 0);
+    let r = this.random() * total;
+    let pick: Loot = weighted[0][0];
+    for (const [k, w] of weighted) {
+      r -= w;
+      if (r <= 0) {
+        pick = k;
+        break;
       }
     }
-    this.removeDeadCreatures();
+    const x = (p.x + c.x) / 2;
+    const z = (p.z + c.z) / 2;
+    if (pick === 'fuel' || pick === 'can' || pick === 'wood') {
+      this.dropItem(x, z, pick, pick === 'wood' ? 3 : pick === 'can' ? 1 + Math.floor(this.random() * 2) : 1);
+    } else {
+      this.dropGear(x, z, pick);
+    }
+    this.events.push({ type: 'search', slot: p.slot, x: c.x, z: c.z });
   }
 
   private use(p: PlayerState): void {
@@ -781,6 +1078,20 @@ export class Sim {
       p.hp = Math.min(PLAYER.maxHp, p.hp + PLAYER.berryHp);
       if (p.item.count <= 0) p.item = null;
       this.events.push({ type: 'eat', slot: p.slot, x: p.x, z: p.z });
+      return;
+    }
+    if (p.item.type === 'can') {
+      p.item.count--;
+      p.food = Math.min(PLAYER.maxFood, p.food + CAN_FOOD);
+      p.hp = Math.min(PLAYER.maxHp, p.hp + PLAYER.berryHp);
+      if (p.item.count <= 0) p.item = null;
+      this.events.push({ type: 'eat', slot: p.slot, x: p.x, z: p.z });
+      return;
+    }
+    if (p.item.type === 'fuel' && this.nearFire(p)) {
+      s.fuel = Math.min(FIRE.maxFuel, s.fuel + p.item.count * GAS_FUEL);
+      p.item = null;
+      this.events.push({ type: 'fuel', slot: p.slot, x: 0, z: 0 });
       return;
     }
     if (p.item.type === 'wood' && this.nearFire(p)) {
@@ -848,6 +1159,7 @@ export class Sim {
 
   private damagePlayer(p: PlayerState, amount: number, hit: boolean): void {
     if (p.downed) return;
+    if (hit && p.armor) amount *= 1 - ARMOR[p.armor];
     p.hp -= amount;
     if (hit) {
       p.hurtT = 0;
@@ -1035,11 +1347,228 @@ export class Sim {
     s.creatures = s.creatures.filter((c) => !(c.flee && c.fleeT > 3.2));
   }
 
-  private hitWall(c: CreatureState, wi: number): void {
+  // -------------------------------------------------------------------------
+  // Zombies
+  // -------------------------------------------------------------------------
+
+  /** Fill every city block up to its zombie quota (more downtown, more every night). */
+  populateCity(night: number): void {
+    const s = this.state;
+    const w = this.world;
+    const players = Math.max(1, s.players.length);
+    const scale = (1 + 0.3 * (night - 1)) * (0.7 + 0.15 * players);
+    const perBlock = new Array<number>(w.city.blocks.length).fill(0);
+    let city = 0;
+    for (const z of s.zombies) {
+      if (z.horde) continue;
+      perBlock[z.block]++;
+      city++;
+    }
+    // Downtown first, so the cap never starves the dangerous districts.
+    const order = w.city.blocks.map((_, i) => i).sort((a, b) => w.city.blocks[b].tier - w.city.blocks[a].tier);
+    for (const bi of order) {
+      const b = w.city.blocks[bi];
+      const target = Math.round(ZOMBIE.perBlock[b.tier] * scale * (b.park ? 0.5 : 1));
+      for (let tries = 0; perBlock[bi] < target && tries < target * 4 && city < ZOMBIE.cityMax && s.zombies.length < ZOMBIE.max; tries++) {
+        const pt = w.randomPointInBlock(() => this.random(), bi);
+        if (!pt || s.players.some((p) => Math.hypot(p.x - pt.x, p.z - pt.z) < 12)) continue;
+        this.spawnZombie(pt.x, pt.z, bi, false);
+        perBlock[bi]++;
+        city++;
+      }
+    }
+  }
+
+  private spawnZombie(x: number, z: number, block: number, horde: boolean): void {
+    const s = this.state;
+    s.zombies.push({
+      id: s.nextId++,
+      x,
+      z,
+      px: x,
+      pz: z,
+      fx: 0,
+      fz: 1,
+      hp: Math.round((ZOMBIE.hp + ZOMBIE.hpPerNight * (s.night - 1)) * 2) / 2,
+      cd: 0,
+      block,
+      horde,
+      wx: x,
+      wz: z,
+      wanderT: this.random() * 3,
+      alertT: 0,
+      detourT: 0,
+      detour: 1,
+      hurtT: 9,
+      attackT: 9,
+      age: 0,
+      shade: this.random(),
+    });
+  }
+
+  /** At night a horde streams out of the city edge that faces the camp. */
+  private stepHorde(): void {
+    const s = this.state;
+    if (s.phase !== 'night' || s.hordeLeft <= 0) return;
+    s.hordeTimer -= DT;
+    if (s.hordeTimer > 0) return;
+    s.hordeTimer = (PHASE_TIME.night * 0.45) / Math.max(1, s.hordeLeft + 1);
+    if (s.zombies.length >= ZOMBIE.max) return;
+    const c = this.world.city;
+    const mid = (CITY.roadCells * c.cell) / 2;
+    const t = 0.1 + this.random() * 0.8;
+    const along = (a0: number, a1: number) => a0 + t * (a1 - a0);
+    const [x, z] =
+      c.dirX === 1
+        ? [c.x0 + mid, along(c.z0, c.z1)]
+        : c.dirX === -1
+          ? [c.x1 - mid, along(c.z0, c.z1)]
+          : c.dirZ === 1
+            ? [along(c.x0, c.x1), c.z0 + mid]
+            : [along(c.x0, c.x1), c.z1 - mid];
+    if (!this.world.isWalkable(x, z) || s.players.some((p) => Math.hypot(p.x - x, p.z - z) < 9)) return;
+    this.spawnZombie(x, z, Math.floor(this.random() * c.blocks.length), true);
+    s.hordeLeft--;
+    if (!s.hordeWarned) {
+      s.hordeWarned = true;
+      this.events.push({ type: 'horde' });
+    }
+  }
+
+  private stepZombies(): void {
+    const s = this.state;
+    const w = this.world;
+    const night = s.phase === 'night';
+    const bonus = ZOMBIE.speedPerNight * (s.night - 1);
+
+    for (const z of s.zombies) {
+      z.age += DT;
+      z.hurtT += DT;
+      z.attackT += DT;
+      z.cd = Math.max(0, z.cd - DT);
+      z.alertT = Math.max(0, z.alertT - DT);
+      z.detourT = Math.max(0, z.detourT - DT);
+      z.wanderT -= DT;
+      if (z.hurtT < 0.2) continue; // staggered by a hit
+
+      const aggro = (night ? ZOMBIE.aggroNight : ZOMBIE.aggroDay) * (z.alertT > 0 ? 2 : 1);
+      let prey: PlayerState | null = null;
+      let preyD = aggro;
+      for (const p of s.players) {
+        if (p.downed || !p.connected) continue;
+        const d = Math.hypot(p.x - z.x, p.z - z.z);
+        if (d < preyD) {
+          preyD = d;
+          prey = p;
+        }
+      }
+
+      let tx = 0;
+      let tz = 0;
+      let speed = 0;
+      if (prey) {
+        tx = prey.x - z.x;
+        tz = prey.z - z.z;
+        speed = (night ? ZOMBIE.speedNight : ZOMBIE.speedChase) + bonus;
+        if (preyD - PLAYER.radius - ZOMBIE.radius < ZOMBIE.attackRange) {
+          speed = 0;
+          if (z.cd <= 0) {
+            z.cd = ZOMBIE.attackCooldown;
+            z.attackT = 0;
+            this.damagePlayer(prey, ZOMBIE.damage, true);
+            this.events.push({ type: 'zombieAttack', x: z.x, z: z.z });
+          }
+        }
+      } else if (z.horde) {
+        tx = -z.x;
+        tz = -z.z;
+        const d = Math.hypot(z.x, z.z);
+        if (d <= FIRE.ringRadius + ZOMBIE.radius + 0.5) {
+          // Stamping on the campfire.
+          s.fuel -= ZOMBIE.trampleFuel * DT;
+          if (z.cd <= 0) {
+            z.cd = 1;
+            z.attackT = 0;
+            this.events.push({ type: 'trample', x: z.x, z: z.z });
+          }
+        } else {
+          speed = ZOMBIE.speedNight * 0.8 + bonus;
+        }
+      } else {
+        const b = w.city.blocks[z.block];
+        const hx = (b.x0 + b.x1) / 2;
+        const hz = (b.z0 + b.z1) / 2;
+        if (Math.hypot(z.x - hx, z.z - hz) > 14) {
+          z.wx = hx;
+          z.wz = hz;
+        } else if (z.wanderT <= 0 || Math.hypot(z.wx - z.x, z.wz - z.z) < 0.5) {
+          z.wanderT = 3 + this.random() * 4;
+          const pt = w.randomPointInBlock(() => this.random(), z.block);
+          if (pt) {
+            z.wx = pt.x;
+            z.wz = pt.z;
+          }
+        }
+        tx = z.wx - z.x;
+        tz = z.wz - z.z;
+        speed = Math.hypot(tx, tz) > 0.4 ? ZOMBIE.speedWander : 0;
+      }
+
+      const len = Math.hypot(tx, tz);
+      if (len < 0.01) continue;
+      let dx = tx / len;
+      let dz = tz / len;
+      if (speed > 0) {
+        if (z.detourT > 0) {
+          // Slide around whatever is in the way.
+          const a = 1.2 * z.detour;
+          const ca = Math.cos(a);
+          const sa = Math.sin(a);
+          [dx, dz] = [dx * ca - dz * sa, dx * sa + dz * ca];
+        }
+        const step = speed * DT;
+        const ox = z.x;
+        const oz = z.z;
+        const wall = this.move(z, dx * step, dz * step, ZOMBIE.radius);
+        if (wall >= 0 && z.cd <= 0) this.hitWall(z, wall, ZOMBIE.attackCooldown);
+        if (wall < 0 && z.detourT <= 0 && Math.hypot(z.x - ox, z.z - oz) < step * 0.3) {
+          z.detourT = 0.9;
+          z.detour = this.random() < 0.5 ? 1 : -1;
+        }
+      }
+      z.fx += (dx - z.fx) * 0.15;
+      z.fz += (dz - z.fz) * 0.15;
+      const fl = Math.hypot(z.fx, z.fz) || 1;
+      z.fx /= fl;
+      z.fz /= fl;
+    }
+
+    // Keep them from stacking up.
+    const zs = s.zombies;
+    const min = ZOMBIE.radius * 2;
+    for (let i = 0; i < zs.length; i++) {
+      for (let j = i + 1; j < zs.length; j++) {
+        const a = zs[i];
+        const b = zs[j];
+        const dx = b.x - a.x;
+        const dz = b.z - a.z;
+        if (Math.abs(dx) > min || Math.abs(dz) > min) continue;
+        const d = Math.hypot(dx, dz);
+        if (d < min && d > 0.0001) {
+          const push = (min - d) / 2;
+          this.move(a, (-dx / d) * push, (-dz / d) * push, ZOMBIE.radius);
+          this.move(b, (dx / d) * push, (dz / d) * push, ZOMBIE.radius);
+        }
+      }
+    }
+    this.removeDead();
+  }
+
+  private hitWall(c: { cd: number; attackT: number }, wi: number, cooldown: number = CREATURE.attackCooldown): void {
     const s = this.state;
     const wall = s.walls[wi];
     if (!wall) return;
-    c.cd = CREATURE.attackCooldown;
+    c.cd = cooldown;
     c.attackT = 0;
     wall.hp--;
     this.events.push({ type: 'wallHit', x: wall.x, z: wall.z });
@@ -1091,9 +1620,22 @@ export class Sim {
               break;
             }
             case 'attack':
-              hint = 'Tap A: attack!';
-              a = 'Attack';
+              hint = p.weapon === 'pistol' && p.ammo > 0 ? `Tap A: shoot (${p.ammo})` : 'Tap A: attack!';
+              a = p.weapon === 'pistol' && p.ammo > 0 ? 'Shoot' : 'Attack';
               break;
+            case 'gear': {
+              const g = s.gear.find((q) => q.id === t.id);
+              hint = g ? `Tap A: take ${GEAR_NAME[g.kind]}` : '';
+              a = 'Take';
+              break;
+            }
+            case 'container': {
+              const cont = this.world.city.containers[t.i];
+              hint = cont.kind === 'car' ? 'Hold A: search car' : 'Hold A: search crate';
+              a = 'Search';
+              progress = p.actionKind === 'search' ? p.actionTime / SEARCH_TIME : 0;
+              break;
+            }
             case 'item': {
               const it = s.items.find((i) => i.id === t.id);
               hint = `Tap A: pick up ${it ? ITEM_NAME[it.type] : ''}`;
@@ -1117,18 +1659,28 @@ export class Sim {
           }
         }
       } else {
-        a = 'Swing';
+        a = p.weapon === 'pistol' && p.ammo > 0 ? 'Shoot' : 'Swing';
       }
 
-      if (p.item?.type === 'berry') b = 'Eat';
-      else if (p.item?.type === 'wood' && this.nearFire(p)) b = 'Fuel';
+      if (p.item?.type === 'berry' || p.item?.type === 'can') b = 'Eat';
+      else if ((p.item?.type === 'wood' || p.item?.type === 'fuel') && this.nearFire(p)) b = 'Fuel';
       else if (p.item) b = 'Drop';
 
       if (p.item?.type === 'wood' && p.item.count >= TORCH.cost) c = 'Torch';
       else if (p.item?.type === 'stone' && p.item.count >= WALL.cost) c = 'Wall';
 
+      if (!hint && p.areaT < 3) {
+        hint =
+          p.area === 2
+            ? '☠ Downtown – swarming with zombies'
+            : p.area === 1
+              ? '⚠ Midtown – watch out for zombies'
+              : p.area === 0
+                ? 'Outskirts – search cars and crates'
+                : '';
+      }
       if (!hint) {
-        if (b === 'Fuel') hint = 'B: throw wood in the fire';
+        if (b === 'Fuel') hint = p.item?.type === 'fuel' ? 'B: pour gas on the fire' : 'B: throw wood in the fire';
         else if (s.phase === 'dusk') hint = 'Get back to the fire!';
         else if (p.food < 25 && b === 'Eat') hint = 'B: eat a berry';
         else if (p.food < 25) hint = "You're hungry – find berries";
@@ -1144,12 +1696,25 @@ export class Sim {
       food: Math.round(clamp(p.food, 0, 100)),
       item: p.item ? { type: p.item.type, count: p.item.count } : null,
       hint,
+      gear: this.gearText(p),
       a,
       b,
       c,
       downed: p.downed,
       progress: Math.round(clamp(progress, 0, 1) * 100) / 100,
     };
+  }
+
+  gearText(p: PlayerState): string {
+    const parts: string[] = [];
+    if (p.weapon) parts.push(p.weapon === 'pistol' ? `${GEAR_ICON.pistol}${p.ammo}` : GEAR_ICON[p.weapon]);
+    else if (p.ammo > 0) parts.push(`•${p.ammo}`);
+    if (p.armor) parts.push(GEAR_ICON[p.armor]);
+    return parts.join(' ');
+  }
+
+  districtName(area: number): string {
+    return area >= 0 ? DISTRICT_NAMES[area] : '';
   }
 
   /** Current target of a player, for highlight rendering. */

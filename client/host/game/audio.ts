@@ -21,7 +21,14 @@ export type Sfx =
   | 'lose'
   | 'join'
   | 'wall'
-  | 'countdown';
+  | 'countdown'
+  | 'shot'
+  | 'search'
+  | 'gear'
+  | 'zombie'
+  | 'zombieDie'
+  | 'trample'
+  | 'horde';
 
 export class Audio {
   private ctx: AudioContext | null = null;
@@ -249,6 +256,34 @@ export class Audio {
         break;
       case 'countdown':
         this.tone(880, 0.12, 'sine', 0.2);
+        break;
+      case 'shot':
+        this.hiss(0.18, 1800, 0.9, 'lowpass', 300);
+        this.tone(120, 0.15, 'square', 0.3, 50);
+        break;
+      case 'search':
+        this.hiss(0.1, 1500, 0.25);
+        this.hiss(0.1, 900, 0.25, 'bandpass', undefined, 0.12);
+        this.tone(700, 0.08, 'triangle', 0.15, 900, 0.25);
+        break;
+      case 'gear':
+        this.tone(440, 0.08, 'square', 0.12, 660);
+        this.tone(880, 0.15, 'triangle', 0.15, undefined, 0.07);
+        break;
+      case 'zombie':
+        this.tone(95 + Math.random() * 30, 0.5, 'sawtooth', 0.12, 70);
+        this.hiss(0.4, 350, 0.15, 'bandpass', 200);
+        break;
+      case 'zombieDie':
+        this.tone(140, 0.45, 'sawtooth', 0.18, 45);
+        this.hiss(0.3, 500, 0.3, 'lowpass', 100);
+        break;
+      case 'trample':
+        this.hiss(0.3, 600, 0.35, 'lowpass', 150);
+        break;
+      case 'horde':
+        [80, 92, 104].forEach((f, i) => this.tone(f, 1.4, 'sawtooth', 0.1, f * 0.7, i * 0.25));
+        this.hiss(1.5, 300, 0.2, 'bandpass', 120);
         break;
     }
   }

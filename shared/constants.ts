@@ -27,7 +27,7 @@ export type HapticPattern = (typeof HAPTIC_PATTERNS)[number];
 export const GAME_STATES = ['lobby', 'day', 'dusk', 'night', 'over'] as const;
 export type GameStateName = (typeof GAME_STATES)[number];
 
-export const ITEM_TYPES = ['wood', 'stone', 'berry'] as const;
+export const ITEM_TYPES = ['wood', 'stone', 'berry', 'fuel', 'can'] as const;
 export type ItemType = (typeof ITEM_TYPES)[number];
 
 export const ROOM_CODE_RE = /^[ABCDEFGHJKMNPQRSTUVWXYZ]{4}$/;

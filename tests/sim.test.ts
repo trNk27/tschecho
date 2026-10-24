@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { BTN_A, BTN_B, BTN_C } from '../shared/constants';
-import { CREATURE, FIRE, PHASE_TIME, TICK_HZ } from '../client/host/game/config';
+import { CREATURE, FIRE, PHASE_TIME, TICK_HZ, ZOMBIE } from '../client/host/game/config';
 import { Sim } from '../client/host/game/sim';
 import { World } from '../client/host/game/world';
 
@@ -117,7 +117,11 @@ test('creatures come at night, avoid the light and attack players outside it', (
   const outside = sim.player(2)!;
   sim.state.phase = 'dusk';
   sim.state.phaseTime = PHASE_TIME.dusk - 0.05;
-  run(sim, 30);
+  // Zombies are tested separately; keep them out of this one.
+  run(sim, 30, () => {
+    sim.state.zombies.length = 0;
+    sim.state.hordeLeft = 0;
+  });
   assert.equal(sim.state.phase, 'night');
   assert.ok(sim.state.creatures.length > 0, 'creatures spawned');
   // Keep player 1 by the fire, put player 2 out in the dark next to a creature.
@@ -126,6 +130,7 @@ test('creatures come at night, avoid the light and attack players outside it', (
   outside.z = c.z;
   let minFireDist = Infinity;
   run(sim, 6, () => {
+    sim.state.zombies.length = 0;
     for (const cr of sim.state.creatures) minFireDist = Math.min(minFireDist, Math.hypot(cr.x, cr.z));
   });
   assert.ok(outside.hp < 100 || outside.downed, 'player outside the light got hurt');
@@ -136,6 +141,7 @@ test('creatures come at night, avoid the light and attack players outside it', (
 
 test('downed players can be revived by holding A', () => {
   const sim = newSim(2);
+  sim.state.zombies.length = 0;
   const a = sim.player(1)!;
   const b = sim.player(2)!;
   b.hp = 0;
@@ -187,4 +193,131 @@ test('a full five-night run with idle players ends without errors', () => {
   const ms = (performance.now() - t0) / ticks;
   assert.ok(sim.state.over, 'run ended');
   assert.ok(ms < 1, `tick takes ${ms.toFixed(3)} ms`);
+});
+
+// ---------------------------------------------------------------------------
+// City, zombies and gear
+// ---------------------------------------------------------------------------
+
+test('the city has districts, buildings, cars and more zombies downtown', () => {
+  const c = world.city;
+  assert.equal(c.blocks.length, 16);
+  assert.ok(c.blocks.some((b) => b.tier === 0) && c.blocks.some((b) => b.tier === 1) && c.blocks.some((b) => b.tier === 2));
+  assert.ok(c.buildings.length > 20, `buildings: ${c.buildings.length}`);
+  assert.ok(c.cars.length > 12, `cars: ${c.cars.length}`);
+  assert.ok(c.containers.length > c.cars.length, 'cars plus crates');
+  assert.equal(world.districtAt(0, 0), -1, 'the camp is outside the city');
+  // No trees inside buildings or on streets.
+  for (const t of world.trees) assert.ok(!world.insideBuilding(t.x, t.z), 'tree in a building');
+  const sim = newSim(2);
+  const perTier = [0, 0, 0];
+  const blocksPerTier = [0, 0, 0];
+  for (const b of c.blocks) blocksPerTier[b.tier]++;
+  for (const z of sim.state.zombies) perTier[c.blocks[z.block].tier]++;
+  const density = perTier.map((n, i) => n / blocksPerTier[i]);
+  assert.ok(density[2] > density[1] && density[1] > density[0], `zombies per block: ${density.map((d) => d.toFixed(1))}`);
+});
+
+test('buildings block movement', () => {
+  const sim = newSim(1);
+  const b = world.city.buildings.find((q) => !q.house && q.x1 - q.x0 > 2.5)!;
+  const p = sim.player(1)!;
+  sim.state.zombies.length = 0;
+  p.x = b.x0 - 1;
+  p.z = (b.z0 + b.z1) / 2;
+  run(sim, 2, () => sim.setInput(1, 1, 0, 0)); // walk east into the wall
+  assert.ok(p.x <= b.x0 - 0.4 + 1e-6, `stopped at the wall (x=${p.x.toFixed(2)}, wall=${b.x0.toFixed(2)})`);
+});
+
+test('searching a car drops loot and the car is empty afterwards', () => {
+  const sim = newSim(1);
+  sim.state.zombies.length = 0;
+  const p = sim.player(1)!;
+  const ci = 0;
+  const car = world.city.containers[ci];
+  // Stand next to the car, facing it.
+  for (const [ox, oz] of [[0, 1.6], [0, -1.6], [1.6, 0], [-1.6, 0], [0, 2], [0, -2]]) {
+    p.x = car.x + ox;
+    p.z = car.z + oz;
+    p.fx = -ox / Math.hypot(ox, oz);
+    p.fz = -oz / Math.hypot(ox, oz);
+    sim.setInput(1, 0, 0, 0);
+    sim.step();
+    if (sim.targetOf(1)?.kind === 'container') break;
+  }
+  assert.equal(sim.targetOf(1)?.kind, 'container');
+  const before = sim.state.items.length + sim.state.gear.length;
+  run(sim, 2, () => sim.setInput(1, 0, 0, BTN_A));
+  assert.equal(sim.state.containers[ci], 0);
+  assert.equal(sim.state.items.length + sim.state.gear.length, before + 1);
+});
+
+test('gear: a pistol shoots the nearest zombie, armour reduces damage', () => {
+  const sim = newSim(1);
+  const p = sim.player(1)!;
+  sim.state.zombies.length = 0;
+  sim.state.gear.push({ id: 5000, kind: 'pistol', x: p.x, z: p.z }, { id: 5001, kind: 'armor', x: p.x + 0.3, z: p.z });
+  sim.setInput(1, 0, 0, BTN_A);
+  sim.step();
+  sim.setInput(1, 0, 0, 0);
+  sim.step();
+  sim.setInput(1, 0, 0, BTN_A);
+  sim.step();
+  assert.equal(p.weapon, 'pistol');
+  assert.equal(p.armor, 'armor');
+  assert.ok(p.ammo > 0);
+  // A zombie 6 units away gets shot.
+  (sim as unknown as { spawnZombie: (x: number, z: number, b: number, h: boolean) => void }).spawnZombie(p.x + 6, p.z, 0, false);
+  const z = sim.state.zombies[0];
+  z.hp = 10;
+  const ammo = p.ammo;
+  sim.setInput(1, 0, 0, 0);
+  sim.step();
+  sim.setInput(1, 0, 0, BTN_A);
+  sim.step();
+  assert.equal(p.ammo, ammo - 1);
+  assert.ok(z.hp < 10, 'zombie was hit');
+  // Let it bite: armour takes off more than half the damage.
+  z.hp = 99;
+  z.x = p.x + 0.9;
+  z.z = p.z;
+  const hp = p.hp;
+  run(sim, 1.5, () => sim.setInput(1, 0, 0, 0));
+  assert.ok(p.hp < hp, 'got bitten');
+  assert.ok(hp - p.hp <= ZOMBIE.damage * 0.45 * 2 + 1e-6, `damage taken ${hp - p.hp}`);
+});
+
+test('the night horde marches on the camp and stamps on the fire', () => {
+  const sim = newSim(1);
+  const p = sim.player(1)!;
+  p.connected = false; // nobody to chase: the horde goes straight for the fire
+  sim.state.zombies.length = 0;
+  sim.state.phase = 'dusk';
+  sim.state.phaseTime = PHASE_TIME.dusk - 0.05;
+  let horde = 0;
+  let trample = false;
+  for (let i = 0; i < 30 * 80 && !sim.state.over; i++) {
+    sim.step();
+    for (const e of sim.events) {
+      if (e.type === 'horde') horde++;
+      if (e.type === 'trample') trample = true;
+    }
+    sim.events.length = 0;
+    sim.state.fuel = Math.max(sim.state.fuel, 50);
+    if (trample) break;
+  }
+  assert.equal(horde, 1, 'one horde warning');
+  assert.ok(sim.state.zombies.some((z) => z.horde), 'horde zombies spawned');
+  assert.ok(trample, 'a zombie reached the fire');
+});
+
+test('the city refills with more zombies every day', () => {
+  const sim = newSim(2, 5);
+  const day1 = sim.state.zombies.length;
+  sim.state.zombies.length = 0;
+  sim.state.night = 3;
+  sim.populateCity(3);
+  assert.ok(sim.state.zombies.length > day1, `${sim.state.zombies.length} > ${day1}`);
+  assert.ok(sim.state.zombies.length <= ZOMBIE.max);
+  assert.ok(sim.state.zombies[0].hp > ZOMBIE.hp, 'tougher later on');
 });

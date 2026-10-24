@@ -7,12 +7,14 @@ import type { PlayerState, Sim } from './game/sim';
 import type { World } from './game/world';
 
 const $ = (id: string) => document.getElementById(id)!;
-const ITEM_ICON: Record<string, string> = { wood: '🪵', stone: '🪨', berry: '🫐' };
+const ITEM_ICON: Record<string, string> = { wood: '🪵', stone: '🪨', berry: '🫐', fuel: '⛽', can: '🥫' };
 
 interface FrameEls {
   root: HTMLElement;
   name: HTMLElement;
   item: HTMLElement;
+  gear: HTMLElement;
+  area: HTMLElement;
   hp: HTMLElement;
   food: HTMLElement;
   hint: HTMLElement;
@@ -71,13 +73,16 @@ export class Hud {
     const hp = el('i', '', hpBar);
     const foodBar = el('div', 'mini-bar food', tag);
     const food = el('i', '', foodBar);
+    const meta = el('div', 'meta', tag);
+    const gear = el('span', 'gear', meta);
+    const area = el('span', 'area', meta);
     const progress = el('div', 'progress', root);
     const progressBar = el('i', '', progress);
     const hint = el('div', 'hint', root);
     const alert = el('div', 'alert', root);
     const cover = el('div', 'cover', root);
     cover.hidden = true;
-    f = { root, name, item, hp, food, hint, progress, progressBar, alert, cover };
+    f = { root, name, item, gear, area, hp, food, hint, progress, progressBar, alert, cover };
     this.frames.set(p.slot, f);
     return f;
   }
@@ -98,6 +103,9 @@ export class Hud {
       f.name.textContent = p.name;
       f.item.textContent = p.item ? `${ITEM_ICON[p.item.type]}×${p.item.count}` : '';
       f.hp.style.transform = `scaleX(${Math.max(0, p.hp) / 100})`;
+      f.gear.textContent = sim.gearText(p);
+      f.area.textContent = p.area >= 0 ? `📍 ${sim.districtName(p.area)}` : '';
+      f.area.className = `area tier${p.area}`;
       f.food.style.transform = `scaleX(${p.food / 100})`;
       const hud = sim.hudFor(slot);
       f.hint.textContent = p.downed ? '' : (hud?.hint ?? '');
@@ -197,6 +205,16 @@ export class Hud {
         }
       }
       b.putImageData(img, 0, 0);
+      // The city: streets, then buildings tinted by district.
+      const c = world.city;
+      const px = (v: number) => (v / world.size + 0.5) * S;
+      b.fillStyle = '#4a4c50';
+      b.fillRect(px(c.x0), px(c.z0), px(c.x1) - px(c.x0), px(c.z1) - px(c.z0));
+      const tint = ['#9a948a', '#a0705a', '#7a3030'];
+      for (const bl of c.blocks) {
+        b.fillStyle = bl.park ? '#5f9f41' : tint[bl.tier];
+        b.fillRect(px(bl.x0), px(bl.z0), px(bl.x1) - px(bl.x0), px(bl.z1) - px(bl.z0));
+      }
     }
     const s = sim.state;
     const toPx = (v: number) => (v / world.size + 0.5) * S;
@@ -223,6 +241,8 @@ export class Hud {
       if (c.flee) continue;
       ctx.fillRect(toPx(c.x) - 2, toPx(c.z) - 2, 4, 4);
     }
+    ctx.fillStyle = '#9be15d';
+    for (const z of s.zombies) ctx.fillRect(toPx(z.x) - 1.5, toPx(z.z) - 1.5, 3, 3);
     for (const p of s.players) {
       ctx.fillStyle = p.color;
       ctx.strokeStyle = '#000';

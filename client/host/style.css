@@ -95,6 +95,30 @@ body {
   font-size: 15px;
 }
 
+.frame .meta {
+  display: flex;
+  gap: 8px;
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.frame .meta:empty,
+.frame .meta span:empty {
+  display: none;
+}
+
+.frame .area.tier0 {
+  color: #d9d2c5;
+}
+
+.frame .area.tier1 {
+  color: #ffc078;
+}
+
+.frame .area.tier2 {
+  color: #ff6b6b;
+}
+
 .mini-bar {
   height: 7px;
   border-radius: 4px;

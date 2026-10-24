@@ -1,7 +1,8 @@
 // Island generation from a seed. Everything here is deterministic, so the
 // simulation only has to store the seed plus what changed (chopped trees etc.).
 
-import { ISLAND_RADIUS, SHORE_LIMIT, WORLD_SIZE } from './config';
+import { blockIndexAt, CAR_LENGTH, cityCellType, distToCity, generateCity, type CityLayout } from './city';
+import { CITY, ISLAND_RADIUS, SHORE_LIMIT, WORLD_SIZE } from './config';
 import { clamp, fbm, lerp, mulberry32, smoothstep } from './rng';
 
 export interface TreeDef {
@@ -43,10 +44,13 @@ export class World {
   readonly bushes: PropDef[] = [];
   readonly grass: PropDef[] = [];
   readonly flowers: PropDef[] = [];
-  /** Static collider lookup: cell index -> packed (type << 16 | index). type 0 = tree, 1 = rock. */
+  readonly city: CityLayout;
+  /** Static collider lookup: cell index -> packed (type << 16 | index).
+   *  Types: 0 tree, 1 rock, 2 building, 3 car, 4 crate. */
   private colliderCells: Map<number, number[]> = new Map();
 
   constructor(readonly seed: number) {
+    this.city = generateCity(mulberry32(seed ^ 0x51ed270b), this.half, this.cell);
     const n = this.res + 1;
     this.heights = new Float32Array(n * n);
     for (let j = 0; j < n; j++) {
@@ -75,6 +79,9 @@ export class World {
     // Flat clearing for the campfire.
     const c = smoothstep(10, 4.5, d);
     h = lerp(h, 1.1, c);
+    // Flat ground for the city, which also extends the shore where it reaches the sea.
+    const cd = distToCity(this.city, x, z);
+    if (cd < 6) h = lerp(h, CITY.height, smoothstep(6, 0.5, cd));
     return h;
   }
 
@@ -112,6 +119,38 @@ export class World {
     return smoothstep(0.42, 0.62, fbm(x * 0.045 + 50, z * 0.045 - 70, this.seed + 21, 3));
   }
 
+  /** District at a point: -1 outside the city, else 0 outskirts, 1 midtown, 2 downtown. */
+  districtAt(x: number, z: number): number {
+    const b = blockIndexAt(this.city, x, z);
+    return b >= 0 ? this.city.blocks[b].tier : -1;
+  }
+
+  /** True where nature should not grow (city streets and lots, but not parks). */
+  private urban(x: number, z: number, margin: number): boolean {
+    if (distToCity(this.city, x, z) > margin) return false;
+    return cityCellType(this.city, x, z) !== 3;
+  }
+
+  /** Is the point inside (or within `margin` of) a building? */
+  insideBuilding(x: number, z: number, margin = 0): boolean {
+    for (const b of this.city.buildings) {
+      if (x > b.x0 - margin && x < b.x1 + margin && z > b.z0 - margin && z < b.z1 + margin) return true;
+    }
+    return false;
+  }
+
+  /** Random free spot in a city block (its lot plus the road in front of it). */
+  randomPointInBlock(rnd: () => number, blockIndex: number): { x: number; z: number } | null {
+    const b = this.city.blocks[blockIndex];
+    const road = CITY.roadCells * this.cell;
+    for (let k = 0; k < 20; k++) {
+      const x = b.x0 - road + rnd() * (b.x1 - b.x0 + road);
+      const z = b.z0 - road + rnd() * (b.z1 - b.z0 + road);
+      if (this.isWalkable(x, z) && !this.insideBuilding(x, z, 0.6)) return { x, z };
+    }
+    return null;
+  }
+
   private scatter(): void {
     const rnd = mulberry32(this.seed ^ 0x9e3779b9);
     const taken: { x: number; z: number; r: number }[] = [];
@@ -144,7 +183,7 @@ export class World {
       const x = Math.cos(a) * r;
       const z = Math.sin(a) * r;
       const h = this.heightAt(x, z);
-      if (h < 0.8 || this.slopeAt(x, z) > 0.9 || !free(x, z, 1.2)) continue;
+      if (h < 0.8 || this.slopeAt(x, z) > 0.9 || this.urban(x, z, 3) || !free(x, z, 1.2)) continue;
       addTree(x, z);
       k++;
     }
@@ -155,7 +194,7 @@ export class World {
       const d = Math.hypot(x, z);
       if (d < 11) continue;
       const h = this.heightAt(x, z);
-      if (h < 0.85 || this.slopeAt(x, z) > 0.95) continue;
+      if (h < 0.85 || this.slopeAt(x, z) > 0.95 || this.urban(x, z, 3)) continue;
       const density = 0.12 + this.forestAt(x, z) * 0.88;
       if (rnd() > density) continue;
       if (!free(x, z, 1.15)) continue;
@@ -168,7 +207,7 @@ export class World {
       const d = Math.hypot(x, z);
       if (d < 10) continue;
       const h = this.heightAt(x, z);
-      if (h < 0.35) continue;
+      if (h < 0.35 || distToCity(this.city, x, z) < 3) continue;
       const p = h > 2.6 ? 0.9 : h < 0.7 ? 0.5 : 0.22;
       if (rnd() > p) continue;
       const scale = 0.7 + rnd() * 0.7;
@@ -184,7 +223,7 @@ export class World {
       const d = Math.hypot(x, z);
       if (d < (near ? 9 : 14)) continue;
       const h = this.heightAt(x, z);
-      if (h < 0.8 || this.slopeAt(x, z) > 0.9) continue;
+      if (h < 0.8 || this.slopeAt(x, z) > 0.9 || this.urban(x, z, 2)) continue;
       if (!free(x, z, 1.0)) continue;
       this.bushes.push({ x, z, scale: 0.85 + rnd() * 0.35, rot: rnd() * Math.PI * 2, shade: rnd() });
       taken.push({ x, z, r: 1.0 });
@@ -194,18 +233,23 @@ export class World {
     for (let tries = 0; tries < 12000 && this.grass.length < 1500; tries++) {
       const { x, z } = randPoint(ISLAND_RADIUS * 1.05);
       const h = this.heightAt(x, z);
-      if (h < 0.7 || Math.hypot(x, z) < 3.5) continue;
+      if (h < 0.7 || Math.hypot(x, z) < 3.5 || this.urban(x, z, 1)) continue;
       this.grass.push({ x, z, scale: 0.6 + rnd() * 0.8, rot: rnd() * Math.PI * 2, shade: rnd() });
     }
     for (let tries = 0; tries < 6000 && this.flowers.length < 260; tries++) {
       const { x, z } = randPoint(ISLAND_RADIUS);
       const h = this.heightAt(x, z);
-      if (h < 0.9 || Math.hypot(x, z) < 6 || this.forestAt(x, z) > 0.5) continue;
+      if (h < 0.9 || Math.hypot(x, z) < 6 || this.forestAt(x, z) > 0.5 || this.urban(x, z, 1)) continue;
       this.flowers.push({ x, z, scale: 0.7 + rnd() * 0.6, rot: rnd() * Math.PI * 2, shade: rnd() });
     }
 
     this.trees.forEach((t, i) => this.addCollider(t.x, t.z, t.r + 1, (0 << 16) | i));
     this.rocks.forEach((r, i) => this.addCollider(r.x, r.z, r.r + 1, (1 << 16) | i));
+    this.city.buildings.forEach((b, i) =>
+      this.addCollider((b.x0 + b.x1) / 2, (b.z0 + b.z1) / 2, Math.hypot(b.x1 - b.x0, b.z1 - b.z0) / 2 + 1, (2 << 16) | i),
+    );
+    this.city.cars.forEach((c, i) => this.addCollider(c.x, c.z, CAR_LENGTH / 2 + 1, (3 << 16) | i));
+    this.city.crates.forEach((c, i) => this.addCollider(c.x, c.z, 1.8, (4 << 16) | i));
   }
 
   private cellKey(cx: number, cz: number): number {
